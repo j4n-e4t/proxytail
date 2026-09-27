@@ -1,0 +1,68 @@
+# Development stack: Traefik + Tailscale sidecar in Docker, proxytail running on the host (`bun run dev`).
+#   docker compose -f docker-compose.dev.yml up -d
+#   docker compose -f docker-compose.dev.yml --profile demo up -d   # + an ephemeral whoami test peer
+name: proxytail
+
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    hostname: ${TS_HOSTNAME:-proxytail}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${TRAEFIK_DASHBOARD_PORT:-8080}:8080"
+    restart: unless-stopped
+
+  traefik:
+    image: traefik:v3.5
+    network_mode: service:tailscale
+    depends_on:
+      - tailscale
+    command:
+      - --entrypoints.web.address=:80
+      - --api.insecure=true
+      - --providers.http.endpoint=http://host.docker.internal:${PORT:-3000}/api/traefik/config
+      - --providers.http.pollInterval=5s
+      - --log.level=INFO
+      - --accesslog=true
+    restart: unless-stopped
+
+  # Optional test peer: joins the tailnet as "proxytail-demo" (ephemeral) and serves traefik/whoami on :80.
+  demo-tailscale:
+    profiles: [demo]
+    image: tailscale/tailscale:latest
+    hostname: proxytail-demo
+    environment:
+      TS_AUTHKEY: ${TS_DEMO_AUTHKEY:-${TS_AUTHKEY}}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    restart: unless-stopped
+
+  demo-whoami:
+    profiles: [demo]
+    image: traefik/whoami
+    network_mode: service:demo-tailscale
+    depends_on:
+      - demo-tailscale
+    restart: unless-stopped
+
+volumes:
+  tailscale-state:

@@ -1,0 +1,67 @@
+# Production stack: proxytail + Traefik joined to your tailnet through a Tailscale sidecar.
+#   cp .env.example .env   # set TS_AUTHKEY + Tailscale API credentials
+#   docker compose up -d   # pulls ghcr.io/j4n-e4t/proxytail (or `--build` to build locally)
+name: proxytail
+
+services:
+  # Named "app" rather than "proxytail": inside Traefik's (shared) network namespace the Tailscale
+  # container's own hostname would shadow a service called "proxytail".
+  app:
+    image: ${PROXYTAIL_IMAGE:-ghcr.io/j4n-e4t/proxytail:latest}
+    build: .
+    restart: unless-stopped
+    environment:
+      TRAEFIK_API_URL: http://tailscale:8080
+      TS_API_KEY: ${TS_API_KEY:-}
+      TS_OAUTH_CLIENT_ID: ${TS_OAUTH_CLIENT_ID:-}
+      TS_OAUTH_CLIENT_SECRET: ${TS_OAUTH_CLIENT_SECRET:-}
+      TS_TAILNET: ${TS_TAILNET:--}
+      PUBLIC_ADDRESS: ${PUBLIC_ADDRESS:-}
+    volumes:
+      - proxytail-data:/data
+    ports:
+      # The UI has no authentication yet — only bind it to localhost (or a private interface).
+      - "${UI_BIND:-127.0.0.1}:${UI_PORT:-3000}:3000"
+
+  tailscale:
+    image: tailscale/tailscale:latest
+    hostname: ${TS_HOSTNAME:-proxytail}
+    restart: unless-stopped
+    environment:
+      # Only needed for the first start; the node identity is kept in the tailscale-state volume.
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    # Traefik shares this container's network namespace, so its public port is published here.
+    ports:
+      - "${HTTP_PORT:-80}:80"
+
+  traefik:
+    image: traefik:v3.5
+    restart: unless-stopped
+    network_mode: service:tailscale
+    depends_on:
+      tailscale:
+        condition: service_started
+      app:
+        condition: service_healthy
+    command:
+      - --entrypoints.web.address=:80
+      # Internal API (port 8080, not published) — proxytail reads router status from it.
+      - --api.insecure=true
+      - --providers.http.endpoint=http://app:3000/api/traefik/config
+      - --providers.http.pollInterval=5s
+      - --log.level=INFO
+      - --accesslog=true
+
+volumes:
+  proxytail-data:
+  tailscale-state:
