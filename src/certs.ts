@@ -24,6 +24,10 @@ function tlsTarget() {
 /**
  * Connects to Traefik with the given SNI and inspects the certificate it serves. Traefik answers with its
  * self-signed "TRAEFIK DEFAULT CERT" until the ACME certificate for that hostname has been issued.
+ *
+ * Also works for services that require a client certificate, although the probe sends none: the server certificate
+ * arrives before Traefik asks for the client's, and with TLS 1.3 Traefik only rejects the missing certificate after
+ * the client considers the handshake complete, i.e. after `secureConnect` has fired and the result is settled.
  */
 export function probeCertificate(servername: string): Promise<CertInfo> {
   const { host, port } = tlsTarget();

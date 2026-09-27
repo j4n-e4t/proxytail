@@ -116,10 +116,7 @@ function Brand() {
       <div className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
         <Waypoints className="size-4" />
       </div>
-      <div className="leading-tight">
-        <p className="font-semibold tracking-tight">proxytail</p>
-        <p className="text-[11px] text-muted-foreground">Tailscale × Traefik</p>
-      </div>
+      <p className="font-semibold tracking-tight">proxytail</p>
     </div>
   );
 }
@@ -178,30 +175,6 @@ function Console() {
       <aside className="sticky top-0 flex h-screen w-60 shrink-0 flex-col border-r bg-sidebar">
         <Brand />
 
-        {/* Connection state of the two systems proxytail drives, right under the brand. */}
-        <div className="space-y-0.5 border-b px-3 pb-3">
-          <ServiceStatus
-            icon={TailscaleIcon}
-            ok={configured && !devices.error}
-            label="Tailscale"
-            detail={
-              !configured
-                ? "Not configured"
-                : devices.error
-                  ? "Error"
-                  : `${devices.data?.filter((d) => d.online).length ?? "…"} ${devices.data?.filter((d) => d.online).length === 1 ? "peer" : "peers"} online`
-            }
-            title={devices.error ?? undefined}
-          />
-          <ServiceStatus
-            icon={TraefikIcon}
-            ok={!!traefik.data?.reachable}
-            label="Traefik"
-            detail={traefik.data?.reachable ? `v${traefik.data.version} · connected` : "Unreachable"}
-            title={traefik.data?.error}
-          />
-        </div>
-
         <nav className="flex-1 space-y-1 px-3 py-2">
           <NavItem
             icon={Waypoints}
@@ -240,6 +213,29 @@ function Console() {
         </nav>
 
         <div className="space-y-1 border-t p-3">
+          {/* Connection state of the two systems proxytail drives. */}
+          <div className="space-y-0.5">
+            <ServiceStatus
+              icon={TailscaleIcon}
+              ok={configured && !devices.error}
+              label="Tailscale"
+              detail={
+                !configured
+                  ? "Not configured"
+                  : devices.error
+                    ? "Error"
+                    : `${devices.data?.filter((d) => d.online).length ?? "…"} ${devices.data?.filter((d) => d.online).length === 1 ? "peer" : "peers"} online`
+              }
+              title={devices.error ?? undefined}
+            />
+            <ServiceStatus
+              icon={TraefikIcon}
+              ok={!!traefik.data?.reachable}
+              label="Traefik"
+              detail={traefik.data?.reachable ? `v${traefik.data.version} · connected` : "Unreachable"}
+              title={traefik.data?.error}
+            />
+          </div>
           <div className="flex items-center justify-between px-3 pt-2">
             <span className="text-xs text-muted-foreground">Theme</span>
             <ToggleGroup

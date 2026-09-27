@@ -21,6 +21,8 @@ db.run(`
     scheme TEXT NOT NULL DEFAULT 'http',
     insecure_skip_verify INTEGER NOT NULL DEFAULT 0,
     enabled INTEGER NOT NULL DEFAULT 1,
+    client_auth TEXT NOT NULL DEFAULT 'off',
+    client_cert_headers INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )
@@ -35,11 +37,6 @@ if (!hostColumns.includes("basic_auth")) {
 if (!hostColumns.includes("health_check")) {
   db.run("ALTER TABLE proxy_hosts ADD COLUMN health_check INTEGER NOT NULL DEFAULT 0");
   db.run("ALTER TABLE proxy_hosts ADD COLUMN health_check_path TEXT NOT NULL DEFAULT '/'");
-}
-if (!hostColumns.includes("client_auth")) {
-  db.run("ALTER TABLE proxy_hosts ADD COLUMN client_auth TEXT NOT NULL DEFAULT 'off'");
-  db.run("ALTER TABLE proxy_hosts ADD COLUMN client_ca_ids TEXT NOT NULL DEFAULT '[]'");
-  db.run("ALTER TABLE proxy_hosts ADD COLUMN client_cert_headers INTEGER NOT NULL DEFAULT 0");
 }
 
 db.run(`
@@ -69,19 +66,19 @@ db.run(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     cert_pem TEXT NOT NULL,
-    key_pem TEXT,
     summary TEXT NOT NULL,
     cert_count INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `);
 
+// Which CAs a service trusts. The foreign keys make a CA that's in use impossible to delete, and a service impossible to
+// attach to a CA that doesn't exist, whatever the order of concurrent requests.
 db.run(`
-  CREATE TABLE IF NOT EXISTS client_certs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ca_id INTEGER NOT NULL REFERENCES client_cas(id) ON DELETE CASCADE,
-    summary TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  CREATE TABLE IF NOT EXISTS host_client_cas (
+    host_id INTEGER NOT NULL REFERENCES proxy_hosts(id) ON DELETE CASCADE,
+    ca_id INTEGER NOT NULL REFERENCES client_cas(id) ON DELETE RESTRICT,
+    PRIMARY KEY (host_id, ca_id)
   )
 `);
 
@@ -139,13 +136,25 @@ interface ProxyHostRow {
   health_check: number;
   health_check_path: string;
   client_auth: ClientAuth;
-  client_ca_ids: string;
   client_cert_headers: number;
   created_at: string;
   updated_at: string;
 }
 
-function toHost(r: ProxyHostRow): ProxyHost {
+/** CA ids per host id. */
+function caLinks(hostId?: number) {
+  const rows =
+    hostId === undefined
+      ? db.query<{ host_id: number; ca_id: number }, []>("SELECT * FROM host_client_cas ORDER BY ca_id").all()
+      : db
+          .query<{ host_id: number; ca_id: number }, [number]>("SELECT * FROM host_client_cas WHERE host_id = ? ORDER BY ca_id")
+          .all(hostId);
+  const links = new Map<number, number[]>();
+  for (const r of rows) links.set(r.host_id, [...(links.get(r.host_id) ?? []), r.ca_id]);
+  return links;
+}
+
+function toHost(r: ProxyHostRow, links = caLinks(r.id)): ProxyHost {
   return {
     id: r.id,
     domains: JSON.parse(r.domains),
@@ -161,7 +170,7 @@ function toHost(r: ProxyHostRow): ProxyHost {
     healthCheck: !!r.health_check,
     healthCheckPath: r.health_check_path,
     clientAuth: r.client_auth,
-    clientCaIds: JSON.parse(r.client_ca_ids),
+    clientCaIds: links.get(r.id) ?? [],
     clientCertHeaders: !!r.client_cert_headers,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -183,46 +192,61 @@ function toParams(h: ProxyHostInput) {
     health_check: h.healthCheck ? 1 : 0,
     health_check_path: h.healthCheckPath,
     client_auth: h.clientAuth,
-    client_ca_ids: JSON.stringify(h.clientCaIds),
     client_cert_headers: h.clientCertHeaders ? 1 : 0,
   };
 }
 
+function setCaLinks(hostId: number, h: ProxyHostInput) {
+  db.query("DELETE FROM host_client_cas WHERE host_id = ?").run(hostId);
+  const ids = h.clientAuth === "off" ? [] : h.clientCaIds;
+  // Checked here too, so no caller can store a policy that requires certificates without a CA to verify them.
+  if (h.clientAuth !== "off" && !ids.length) throw new Error("Client certificates need at least one CA");
+  const insert = db.query("INSERT INTO host_client_cas (host_id, ca_id) VALUES (?, ?)");
+  for (const caId of ids) insert.run(hostId, caId);
+}
+
 export const hosts = {
   list(): ProxyHost[] {
-    return db.query<ProxyHostRow, []>("SELECT * FROM proxy_hosts ORDER BY id").all().map(toHost);
+    const links = caLinks();
+    return db
+      .query<ProxyHostRow, []>("SELECT * FROM proxy_hosts ORDER BY id")
+      .all()
+      .map((r) => toHost(r, links));
   },
   get(id: number): ProxyHost | null {
     const row = db.query<ProxyHostRow, [number]>("SELECT * FROM proxy_hosts WHERE id = ?").get(id);
     return row ? toHost(row) : null;
   },
-  create(h: ProxyHostInput): ProxyHost {
+  /** Throws a SQLite foreign key error if one of the CAs doesn't exist (anymore); nothing is written then. */
+  create: db.transaction((h: ProxyHostInput): ProxyHost => {
     const row = db
       .query<ProxyHostRow, any>(
         `INSERT INTO proxy_hosts (domains, device_id, device_name, target_ip, target_port, scheme, insecure_skip_verify, enabled,
-           basic_auth, basic_auth_users, health_check, health_check_path, client_auth, client_ca_ids, client_cert_headers)
+           basic_auth, basic_auth_users, health_check, health_check_path, client_auth, client_cert_headers)
          VALUES ($domains, $device_id, $device_name, $target_ip, $target_port, $scheme, $insecure_skip_verify, $enabled,
-           $basic_auth, $basic_auth_users, $health_check, $health_check_path, $client_auth, $client_ca_ids,
-           $client_cert_headers)
+           $basic_auth, $basic_auth_users, $health_check, $health_check_path, $client_auth, $client_cert_headers)
          RETURNING *`,
       )
       .get(toParams(h))!;
+    setCaLinks(row.id, h);
     return toHost(row);
-  },
-  update(id: number, h: ProxyHostInput): ProxyHost | null {
+  }),
+  update: db.transaction((id: number, h: ProxyHostInput): ProxyHost | null => {
     const row = db
       .query<ProxyHostRow, any>(
         `UPDATE proxy_hosts SET domains = $domains, device_id = $device_id, device_name = $device_name,
            target_ip = $target_ip, target_port = $target_port, scheme = $scheme,
            insecure_skip_verify = $insecure_skip_verify, enabled = $enabled, basic_auth = $basic_auth,
            basic_auth_users = $basic_auth_users, health_check = $health_check, health_check_path = $health_check_path,
-           client_auth = $client_auth, client_ca_ids = $client_ca_ids, client_cert_headers = $client_cert_headers,
+           client_auth = $client_auth, client_cert_headers = $client_cert_headers,
            updated_at = datetime('now')
          WHERE id = $id RETURNING *`,
       )
       .get({ ...toParams(h), id });
-    return row ? toHost(row) : null;
-  },
+    if (!row) return null;
+    setCaLinks(id, h);
+    return toHost(row);
+  }),
   delete(id: number): boolean {
     return db.query("DELETE FROM proxy_hosts WHERE id = ?").run(id).changes > 0;
   },
@@ -307,11 +331,9 @@ export const domains = {
 export interface ClientCa {
   id: number;
   name: string;
+  /** One or more PEM certificates: the CA, plus any intermediates. */
   certPem: string;
-  /** Only set for CAs generated here, which can issue client certificates. Never leaves the server. */
-  keyPem: string | null;
   summary: CertSummary;
-  /** Certificates in the bundle; imported bundles may include intermediates. */
   certCount: number;
   createdAt: string;
 }
@@ -320,7 +342,6 @@ interface ClientCaRow {
   id: number;
   name: string;
   cert_pem: string;
-  key_pem: string | null;
   summary: string;
   cert_count: number;
   created_at: string;
@@ -330,7 +351,6 @@ const toCa = (r: ClientCaRow): ClientCa => ({
   id: r.id,
   name: r.name,
   certPem: r.cert_pem,
-  keyPem: r.key_pem,
   summary: JSON.parse(r.summary),
   certCount: r.cert_count,
   createdAt: r.created_at,
@@ -348,62 +368,19 @@ export const clientCas = {
     return toCa(
       db
         .query<ClientCaRow, any>(
-          `INSERT INTO client_cas (name, cert_pem, key_pem, summary, cert_count)
-           VALUES ($name, $cert_pem, $key_pem, $summary, $cert_count) RETURNING *`,
+          `INSERT INTO client_cas (name, cert_pem, summary, cert_count)
+           VALUES ($name, $cert_pem, $summary, $cert_count) RETURNING *`,
         )
-        .get({
-          name: ca.name,
-          cert_pem: ca.certPem,
-          key_pem: ca.keyPem,
-          summary: JSON.stringify(ca.summary),
-          cert_count: ca.certCount,
-        })!,
+        .get({ name: ca.name, cert_pem: ca.certPem, summary: JSON.stringify(ca.summary), cert_count: ca.certCount })!,
     );
   },
   rename(id: number, name: string): ClientCa | null {
     const row = db.query<ClientCaRow, [string, number]>("UPDATE client_cas SET name = ? WHERE id = ? RETURNING *").get(name, id);
     return row ? toCa(row) : null;
   },
+  /** Throws a SQLite foreign key error while a service still trusts the CA. */
   delete(id: number): boolean {
     return db.query("DELETE FROM client_cas WHERE id = ?").run(id).changes > 0;
-  },
-};
-
-/** A client certificate issued by a generated CA. Only its public details are kept, not its key. */
-export interface ClientCert {
-  id: number;
-  caId: number;
-  summary: CertSummary;
-  createdAt: string;
-}
-
-interface ClientCertRow {
-  id: number;
-  ca_id: number;
-  summary: string;
-  created_at: string;
-}
-
-const toClientCert = (r: ClientCertRow): ClientCert => ({
-  id: r.id,
-  caId: r.ca_id,
-  summary: JSON.parse(r.summary),
-  createdAt: r.created_at,
-});
-
-export const clientCerts = {
-  list(): ClientCert[] {
-    return db.query<ClientCertRow, []>("SELECT * FROM client_certs ORDER BY id DESC").all().map(toClientCert);
-  },
-  create(caId: number, summary: CertSummary): ClientCert {
-    return toClientCert(
-      db
-        .query<ClientCertRow, [number, string]>("INSERT INTO client_certs (ca_id, summary) VALUES (?, ?) RETURNING *")
-        .get(caId, JSON.stringify(summary))!,
-    );
-  },
-  delete(id: number): boolean {
-    return db.query("DELETE FROM client_certs WHERE id = ?").run(id).changes > 0;
   },
 };
 

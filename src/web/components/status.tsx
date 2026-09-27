@@ -58,6 +58,14 @@ export interface ServiceState {
 /** One overall state per service, most severe first: route, then backend health. */
 export function serviceState(host: ProxyHost, traefik: TraefikStatus | null): ServiceState {
   if (!host.enabled) return { tone: "muted", icon: Pause, label: "Disabled", detail: "Removed from Traefik." };
+  // Mirrors buildConfig, which fails closed rather than publishing the route without the client certificate check.
+  if (host.clientAuth !== "off" && !host.clientCaIds.length)
+    return {
+      tone: "danger",
+      icon: ShieldX,
+      label: "Not routed",
+      detail: "Client certificates are required but no CA is attached, so Traefik doesn't serve this service.",
+    };
   if (!traefik?.reachable)
     return { tone: "muted", icon: Globe, label: "Unknown", detail: "Traefik is unreachable, so the state is unknown." };
   const r = traefik.routers[host.id];
@@ -142,17 +150,14 @@ export function StateLabel({ state }: { state: ServiceState }) {
   return <span className={cn("font-medium", text[state.tone])}>{state.label}</span>;
 }
 
-/** A table cell value: a primary line with an icon and a muted second line, with details in a tooltip. */
-function Cell(props: { icon?: LucideIcon; t?: keyof typeof tone; label: string; sub?: string; tip?: string }) {
+/** A table cell value: a label with an icon, with details in a tooltip. */
+function Cell(props: { icon?: LucideIcon; t?: keyof typeof tone; label: string; tip?: string }) {
   const Icon = props.icon;
   const body = (
-    <div className="leading-tight">
-      <p className={cn("flex items-center gap-1.5 text-sm font-medium", props.t && text[props.t])}>
-        {Icon && <Icon className="size-3.5 shrink-0" />}
-        {props.label}
-      </p>
-      {props.sub && <p className="mt-0.5 text-xs text-muted-foreground">{props.sub}</p>}
-    </div>
+    <p className={cn("flex items-center gap-1.5 text-sm font-medium", props.t && text[props.t])}>
+      {Icon && <Icon className="size-3.5 shrink-0" />}
+      {props.label}
+    </p>
   );
   if (!props.tip) return body;
   return (
@@ -178,15 +183,16 @@ export function CertCell({ host, traefik }: { host: ProxyHost; traefik: TraefikS
   const days = daysUntil(cert.validTo);
   switch (cert.state) {
     case "valid":
-      return <Cell icon={ShieldCheck} t="success" label="Valid" sub={`${days} days left`} tip={cert.issuer} />;
+      return (
+        <Cell icon={ShieldCheck} t="success" label="Valid" tip={[`${days} days left`, cert.issuer].filter(Boolean).join(" · ")} />
+      );
     case "untrusted":
       return (
         <Cell
           icon={ShieldAlert}
           t="warning"
           label="Untrusted"
-          sub={cert.issuer ?? "Unknown issuer"}
-          tip={cert.error}
+          tip={[cert.issuer ?? "Unknown issuer", cert.error].filter(Boolean).join(": ")}
         />
       );
     case "pending":
@@ -195,29 +201,26 @@ export function CertCell({ host, traefik }: { host: ProxyHost; traefik: TraefikS
           icon={ShieldEllipsis}
           t="warning"
           label="Issuing"
-          sub="Let's Encrypt"
-          tip="Traefik is still requesting a certificate. Port 80 must be reachable from the internet for the HTTP challenge."
+          tip="Traefik is still requesting a certificate from Let's Encrypt. Port 80 must be reachable from the internet for the HTTP challenge."
         />
       );
     default:
-      return <Cell icon={ShieldX} t="danger" label="TLS error" sub="Hover for details" tip={cert.error} />;
+      return <Cell icon={ShieldX} t="danger" label="TLS error" tip={cert.error} />;
   }
 }
 
 export function AccessCell({ host }: { host: ProxyHost }) {
   const names = host.basicAuthUsers.map((u) => u.username);
-  const users = `${names.length} ${names.length === 1 ? "user" : "users"}`;
   if (host.clientAuth !== "off") {
     const cas = `${host.clientCaIds.length} ${host.clientCaIds.length === 1 ? "CA" : "CAs"}`;
     return (
       <Cell
         icon={ShieldCheck}
         label="Client cert"
-        sub={[host.clientAuth === "require" ? "Required" : "Optional", host.basicAuth && "basic auth"].filter(Boolean).join(" + ")}
-        tip={`Verified against ${cas}${host.basicAuth ? `; basic auth for ${names.join(", ")}` : ""}`}
+        tip={`${host.clientAuth === "require" ? "Required" : "Optional"}, verified against ${cas}${host.basicAuth ? `; basic auth for ${names.join(", ")}` : ""}`}
       />
     );
   }
   if (!host.basicAuth) return <Cell label="Public" t="muted" />;
-  return <Cell icon={KeyRound} label="Basic auth" sub={users} tip={names.join(", ")} />;
+  return <Cell icon={KeyRound} label="Basic auth" tip={names.join(", ")} />;
 }

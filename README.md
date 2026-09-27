@@ -65,10 +65,9 @@ Only peers tagged `tag:proxytail-backend` are listed and can be targeted. Change
 A service can require visitors to present a client certificate. Traefik checks it during the TLS handshake, before a
 request reaches the service, so only devices holding a certificate get through.
 
-1. **Client CAs:** generate a CA, or import the certificate of one you already use. proxytail keeps the key of a
-   generated CA, so you can issue client certificates from it: each one is downloaded once as a password-protected
-   `.p12` (for browsers, keychains and phones) and as PEM files (for `curl --cert … --key …`). Its private key isn't
-   stored. An imported CA only needs its certificate; you issue certificates for it wherever its key lives.
+1. **Client CAs:** upload the certificate of the CA that signs your client certificates (a bundle with intermediates
+   is fine). proxytail only verifies client certificates: it never holds a CA key, so issue certificates with your own
+   tooling, e.g. `step`, `easy-rsa` or `openssl`. Uploads that contain a private key are rejected.
 2. **Services:** turn on **Client certificates**, pick the CAs to trust, and choose what happens without a
    certificate: reject the handshake, or let the visitor through and verify a certificate only if one is presented.
    **Forward certificate details** passes the subject, issuer, serial and validity to the service in the URL-encoded
@@ -77,7 +76,14 @@ request reaches the service, so only devices holding a certificate get through.
 Each service gets its own Traefik TLS option (`tls.options.proxytail-host-<id>`) with the CA certificates inlined, so
 nothing but the generated config is shared with Traefik. Traefik doesn't check revocation lists: a client certificate
 stays valid until it expires. To cut off a lost device, switch its services to a new CA and reissue the other
-certificates. A CA still used by a service can't be deleted.
+certificates.
+
+- A CA still used by a service can't be deleted, and a service can't be saved with a CA that no longer exists. The
+  database enforces both, so concurrent edits can't leave a service without its CAs.
+- Should a service that verifies client certificates ever end up without a CA anyway, proxytail fails closed: it
+  doesn't route the service at all rather than serving it without the check, and the UI shows it as **Not routed**.
+- A client can't get around the check by sending a different SNI name than the `Host` header, e.g. the name of a
+  service without client certificates: Traefik answers `421 Misdirected Request` when their TLS options differ.
 
 ## Security model
 
@@ -112,8 +118,8 @@ at the network layer. That's a deliberate trade-off for personal and homelab set
   network, like `/api/traefik/config`.
 
 Traefik can reach the internet (it needs to for Let's Encrypt), and it holds the certificates and basic auth hashes it
-serves. The keys of client CAs generated in the UI stay in proxytail's database (`proxytail-data`); Traefik only
-receives their certificates.
+serves. Client CAs are stored as certificates only, without keys, so neither proxytail nor Traefik can mint client
+certificates.
 
 ## Development
 

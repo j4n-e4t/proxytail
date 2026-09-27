@@ -34,12 +34,18 @@ export function buildConfig() {
       tls,
     };
     const chain: string[] = [];
-    const caPems = h.clientCaIds.map((id) => cas.get(id)?.certPem).filter((p): p is string => !!p);
-    if (h.clientAuth !== "off" && caPems.length) {
+    if (h.clientAuth !== "off") {
+      const caPems = h.clientCaIds.map((id) => cas.get(id)?.certPem);
+      // Fail closed: a service that should verify client certificates is never published without that check. The
+      // database already prevents this state; this guards against it regardless.
+      if (!caPems.length || caPems.some((p) => !p)) {
+        console.error(`Not routing ${h.domains[0]}: it verifies client certificates but has no CA`);
+        continue;
+      }
       // TLS options apply per SNI hostname, so each service gets its own. caFiles takes PEM content as well as paths.
       tlsOptions[name] = {
         clientAuth: {
-          caFiles: caPems,
+          caFiles: caPems as string[],
           clientAuthType: h.clientAuth === "require" ? "RequireAndVerifyClientCert" : "VerifyClientCertIfGiven",
         },
       };

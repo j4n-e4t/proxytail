@@ -49,13 +49,6 @@ export interface CertSummary {
   fingerprint: string;
 }
 
-export interface ClientCert {
-  id: number;
-  caId: number;
-  summary: CertSummary;
-  createdAt: string;
-}
-
 export interface ClientCa {
   id: number;
   name: string;
@@ -63,22 +56,8 @@ export interface ClientCa {
   summary: CertSummary;
   certCount: number;
   createdAt: string;
-  /** Generated here, so it holds a key and can issue client certificates. */
-  generated: boolean;
   /** Services that verify client certificates against this CA. */
   hostIds: number[];
-  clientCerts: ClientCert[];
-}
-
-export type NewClientCa = { name: string } & ({ mode: "generate"; days: number } | { mode: "import"; pem: string });
-
-export interface IssuedCert {
-  cert: ClientCert;
-  fileName: string;
-  /** Base64 PKCS#12 bundle (key, certificate, CA). */
-  p12: string;
-  certPem: string;
-  keyPem: string;
 }
 
 export interface Device {
@@ -167,12 +146,10 @@ export const api = {
   verifyDomain: (id: number) => request<Domain>("POST", `/api/domains/${id}/verify`),
   deleteDomain: (id: number) => request<void>("DELETE", `/api/domains/${id}`),
   clientCas: () => request<ClientCa[]>("GET", "/api/client-cas"),
-  createClientCa: (ca: NewClientCa) => request<ClientCa>("POST", "/api/client-cas", ca),
+  /** `pem`: the CA certificate, or a bundle with intermediates. Never a key. */
+  createClientCa: (ca: { name: string; pem: string }) => request<ClientCa>("POST", "/api/client-cas", ca),
   renameClientCa: (id: number, name: string) => request<ClientCa>("PATCH", `/api/client-cas/${id}`, { name }),
   deleteClientCa: (id: number) => request<void>("DELETE", `/api/client-cas/${id}`),
-  issueClientCert: (caId: number, c: { commonName: string; days: number; password: string }) =>
-    request<IssuedCert>("POST", `/api/client-cas/${caId}/certs`, c),
-  deleteClientCert: (id: number) => request<void>("DELETE", `/api/client-certs/${id}`),
   detectIp: () => request<{ ip: string }>("POST", "/api/settings/detect-ip"),
   settings: () => request<Settings>("GET", "/api/settings"),
   saveSettings: (s: Record<string, string | null>) => request<Settings>("PUT", "/api/settings", s),

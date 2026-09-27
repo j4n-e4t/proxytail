@@ -1,8 +1,8 @@
+import { SQLiteError } from "bun:sqlite";
 import index from "./web/index.html";
 import { checkBrowserOrigin } from "./guard";
 import {
   clientCas,
-  clientCerts,
   domains as domainStore,
   hosts,
   settings,
@@ -14,7 +14,7 @@ import {
 } from "./db";
 import { checkDomain, detectPublicIp, publicAddress, requiredRecord } from "./dns";
 import { faviconFor } from "./favicons";
-import { generateCa, issueClientCert, parseCaBundle, PkiError } from "./pki";
+import { parseCaBundle, PkiError } from "./pki";
 import {
   clearDeviceCache,
   deviceSource,
@@ -132,6 +132,7 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
     throw new HttpError(400, "Client certificates must be off, require or optional");
   const clientCaIds =
     clientAuth === "off" || !Array.isArray(raw.clientCaIds) ? [] : [...new Set<number>(raw.clientCaIds.map(Number))];
+  // Existence is checked again atomically when the service is written (see saveHost).
   if (clientAuth !== "off") {
     if (!clientCaIds.length) throw new HttpError(400, "Pick at least one CA to verify client certificates against");
     for (const id of clientCaIds) if (!clientCas.get(id)) throw new HttpError(400, `Client CA ${id} does not exist`);
@@ -200,15 +201,22 @@ function domainView(d: ReturnType<typeof domainStore.list>[number]) {
   };
 }
 
-/** CAs as returned by the API: the private key never leaves the server. */
-function caView(ca: ClientCa, all = hosts.list(), certs = clientCerts.list()) {
-  const { keyPem, ...rest } = ca;
-  return {
-    ...rest,
-    generated: !!keyPem,
-    hostIds: all.filter((h) => h.clientAuth !== "off" && h.clientCaIds.includes(ca.id)).map((h) => h.id),
-    clientCerts: certs.filter((c) => c.caId === ca.id),
-  };
+/** SQLite reports a violated ON DELETE RESTRICT as SQLITE_CONSTRAINT_TRIGGER, hence the match on the message. */
+const isForeignKeyError = (e: unknown) =>
+  e instanceof SQLiteError && !!e.code?.startsWith("SQLITE_CONSTRAINT") && e.message.includes("FOREIGN KEY");
+
+/** Writes a service. A CA deleted since validation fails the write instead of being dropped from the service. */
+function saveHost<T>(write: () => T): T {
+  try {
+    return write();
+  } catch (e) {
+    if (isForeignKeyError(e)) throw new HttpError(409, "One of the selected client CAs no longer exists. Reload and try again.");
+    throw e;
+  }
+}
+
+function caView(ca: ClientCa, all = hosts.list()) {
+  return { ...ca, hostIds: all.filter((h) => h.clientCaIds.includes(ca.id)).map((h) => h.id) };
 }
 
 function getCa(raw: string) {
@@ -224,14 +232,8 @@ function validateName(raw: unknown, what: string) {
   return name;
 }
 
-function validateDays(raw: unknown, max: number) {
-  const days = Number(raw);
-  if (!Number.isInteger(days) || days < 1 || days > max) throw new HttpError(400, `Validity must be 1 to ${max} days`);
-  return days;
-}
-
-/** A file name derived from a certificate name. */
-const fileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-|-$/g, "") || "certificate";
+/** A file name derived from a CA name. */
+const fileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-|-$/g, "") || "ca";
 
 function settingsView() {
   const c = tailscaleConfig();
@@ -258,7 +260,8 @@ const server = Bun.serve({
     "/api/hosts": {
       GET: handle(() => json(hosts.list().map(hostView))),
       POST: handle(async (req) => {
-        const h = hosts.create(await validateHost(await body(req)));
+        const input = await validateHost(await body(req));
+        const h = saveHost(() => hosts.create(input));
         return json(hostView(h), 201);
       }),
     },
@@ -289,7 +292,8 @@ const server = Bun.serve({
         const existing = hosts.get(parseId(req.params.id));
         if (!existing) throw new HttpError(404, "Service not found");
         const patch = await body<Record<string, unknown>>(req);
-        const h = hosts.update(existing.id, await validateHost({ ...existing, ...patch }, existing))!;
+        const input = await validateHost({ ...existing, ...patch }, existing);
+        const h = saveHost(() => hosts.update(existing.id, input))!;
         return json(hostView(h));
       }),
       DELETE: handle((req) => {
@@ -336,29 +340,15 @@ const server = Bun.serve({
     "/api/client-cas": {
       GET: handle(() => {
         const all = hosts.list();
-        const certs = clientCerts.list();
-        return json(clientCas.list().map((ca) => caView(ca, all, certs)));
+        return json(clientCas.list().map((ca) => caView(ca, all)));
       }),
+      // Only CA certificates are accepted: proxytail verifies client certificates but never holds a key to issue them.
       POST: handle(async (req) => {
-        const b = await body<{ mode?: string; name?: string; days?: number; pem?: string }>(req);
+        const b = await body<{ name?: string; pem?: string }>(req);
         const name = validateName(b.name, "Name");
-        if (b.mode === "generate") {
-          const ca = await generateCa(name, validateDays(b.days ?? 3650, 7300));
-          const created = clientCas.create({ name, certPem: ca.certPem, keyPem: ca.keyPem, summary: ca.summary, certCount: 1 });
-          return json(caView(created), 201);
-        }
-        if (b.mode === "import") {
-          const bundle = parseCaBundle(String(b.pem ?? ""));
-          const created = clientCas.create({
-            name,
-            certPem: bundle.pem,
-            keyPem: null,
-            summary: bundle.summary,
-            certCount: bundle.count,
-          });
-          return json(caView(created), 201);
-        }
-        throw new HttpError(400, "Mode must be generate or import");
+        const bundle = parseCaBundle(String(b.pem ?? ""));
+        const created = clientCas.create({ name, certPem: bundle.pem, summary: bundle.summary, certCount: bundle.count });
+        return json(caView(created), 201);
       }),
     },
     "/api/client-cas/:id": {
@@ -368,14 +358,21 @@ const server = Bun.serve({
       }),
       DELETE: handle((req) => {
         const ca = getCa(req.params.id);
-        const used = hosts.list().filter((h) => h.clientAuth !== "off" && h.clientCaIds.includes(ca.id));
-        if (used.length)
-          throw new HttpError(409, `${ca.name} is used by ${used.map((h) => h.domains[0]).join(", ")}. Remove it from those services first.`);
-        clientCas.delete(ca.id);
+        const inUse = () => {
+          const used = hosts.list().filter((h) => h.clientCaIds.includes(ca.id));
+          return new HttpError(409, `${ca.name} is used by ${used.map((h) => h.domains[0]).join(", ") || "a service"}. Remove it from those services first.`);
+        };
+        if (hosts.list().some((h) => h.clientCaIds.includes(ca.id))) throw inUse();
+        try {
+          clientCas.delete(ca.id);
+        } catch (e) {
+          // A service started using it since the check above.
+          if (isForeignKeyError(e)) throw inUse();
+          throw e;
+        }
         return new Response(null, { status: 204 });
       }),
     },
-    // The CA certificate, public by nature: to install it wherever client certificates are verified or issued.
     "/api/client-cas/:id/cert.pem": {
       GET: handle((req) => {
         const ca = getCa(req.params.id);
@@ -385,31 +382,6 @@ const server = Bun.serve({
             "Content-Disposition": `attachment; filename="${fileName(ca.name)}.pem"`,
           },
         });
-      }),
-    },
-    "/api/client-cas/:id/certs": {
-      POST: handle(async (req) => {
-        const ca = getCa(req.params.id);
-        if (!ca.keyPem) throw new HttpError(400, `${ca.name} was imported without its key, so it can't issue certificates`);
-        const b = await body<{ commonName?: string; days?: number; password?: string }>(req);
-        const commonName = validateName(b.commonName, "Common name");
-        const days = validateDays(b.days ?? 365, 3650);
-        const password = typeof b.password === "string" ? b.password : "";
-        if (password.length < MIN_PASSWORD)
-          throw new HttpError(400, `The PKCS#12 password must be at least ${MIN_PASSWORD} characters`);
-        const issued = await issueClientCert({ certPem: ca.certPem, keyPem: ca.keyPem }, commonName, days, password);
-        const cert = clientCerts.create(ca.id, issued.summary);
-        // The key is returned once and not stored.
-        return json(
-          { cert, fileName: fileName(commonName), p12: issued.p12, certPem: issued.certPem, keyPem: issued.keyPem },
-          201,
-        );
-      }),
-    },
-    "/api/client-certs/:id": {
-      DELETE: handle((req) => {
-        if (!clientCerts.delete(parseId(req.params.id))) throw new HttpError(404, "Certificate not found");
-        return new Response(null, { status: 204 });
       }),
     },
 

@@ -502,7 +502,7 @@ function ServiceForm(
                           <div className="min-w-0 flex-1 leading-tight">
                             <p className="truncate text-sm font-medium">{ca.name}</p>
                             <p className="truncate text-xs text-muted-foreground">
-                              CN={ca.summary.subject} · {ca.generated ? `${ca.clientCerts.length} issued` : "imported"}
+                              CN={ca.summary.subject}
                             </p>
                           </div>
                           {expired && <span className="text-xs text-destructive">Expired</span>}
