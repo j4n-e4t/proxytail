@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-const dataDir = process.env.DATA_DIR ?? join(import.meta.dir, "..", "data");
+export const dataDir = process.env.DATA_DIR ?? join(import.meta.dir, "..", "data");
 mkdirSync(dataDir, { recursive: true });
 
 export const db = new Database(join(dataDir, "proxytail.db"), { create: true, strict: true });

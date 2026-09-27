@@ -1,10 +1,14 @@
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { certificateFor, type CertInfo } from "./certs";
-import { hosts, type ProxyHost } from "./db";
+import { dataDir, hosts, type ProxyHost } from "./db";
 
 // Every service is served over HTTPS with a Let's Encrypt certificate; plain HTTP is redirected by Traefik.
 const ENTRYPOINTS = ["websecure"];
 const CERT_RESOLVER = "letsencrypt";
 const TRAEFIK_API_URL = process.env.TRAEFIK_API_URL ?? "http://localhost:8080";
+/** Read by Traefik's file provider, which watches the directory. JSON is valid YAML; the provider only reads .yaml/.toml. */
+export const TRAEFIK_CONFIG_FILE = process.env.TRAEFIK_CONFIG_FILE || join(dataDir, "traefik", "proxytail.yaml");
 export const HEALTH_CHECK_INTERVAL = "10s";
 const HEALTH_CHECK_TIMEOUT = "5s";
 
@@ -64,6 +68,28 @@ export function buildConfig() {
   if (Object.keys(serversTransports).length) http.serversTransports = serversTransports;
   if (Object.keys(middlewares).length) http.middlewares = middlewares;
   return { http };
+}
+
+let written: string | null = null;
+
+/**
+ * Writes the dynamic configuration for Traefik's file provider, skipping unchanged content. Traefik never connects to
+ * proxytail: it only reads this file. The rename is atomic, so Traefik never sees a partial file, and the temporary
+ * name has no .yaml extension, so the provider ignores it. The file holds basic auth hashes, hence 0640.
+ */
+export function writeConfig() {
+  const content = JSON.stringify(buildConfig(), null, 2) + "\n";
+  if (content === written) return;
+  try {
+    mkdirSync(dirname(TRAEFIK_CONFIG_FILE), { recursive: true });
+    const tmp = join(dirname(TRAEFIK_CONFIG_FILE), `.${basename(TRAEFIK_CONFIG_FILE)}.tmp`);
+    writeFileSync(tmp, content, { mode: 0o640 });
+    renameSync(tmp, TRAEFIK_CONFIG_FILE);
+    written = content;
+  } catch (e) {
+    // Retried on the next change or reconcile tick.
+    console.error(`Writing Traefik config to ${TRAEFIK_CONFIG_FILE} failed:`, e);
+  }
 }
 
 export interface TraefikStatus {

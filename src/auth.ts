@@ -48,17 +48,12 @@ function remoteIp(req: Request, server: Server<unknown>) {
   return { ip: addr.address.replace(/^::ffff:(?=\d+\.)/, ""), port: addr.port };
 }
 
-/** A direct loopback connection, i.e. Traefik or the healthcheck in the sidecar's network namespace. */
-export function isLocalService(req: Request, server: Server<unknown>) {
-  const remote = remoteIp(req, server);
-  return !!remote && isLoopback(remote.ip) && !req.headers.has("x-forwarded-for");
-}
-
 /**
  * Resolves the caller. Tailnet clients connect directly and are looked up by their source IP. `tailscale serve`
  * connects from loopback and puts the client's Tailscale IP into X-Forwarded-For, replacing any value the client
- * sent, so that header is only trusted on loopback connections. Only containers sharing the sidecar's network
- * namespace (Tailscale, Traefik) can connect from loopback.
+ * sent, so that header is only trusted on loopback connections. Only proxytail and its Tailscale sidecar share that
+ * loopback: Traefik is internet-facing and runs in a separate network namespace (docker-compose.yml), so it can't
+ * reach this server at all, let alone forge the header.
  */
 export async function authenticate(req: Request, server: Server<unknown>): Promise<Session> {
   if (authDisabled) return { identity: null, role: "admin" };

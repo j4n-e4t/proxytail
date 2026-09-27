@@ -89,11 +89,8 @@ export function SettingsPage({
     }
   };
 
-  // Traefik has to poll from loopback (it shares the sidecar's network namespace), or from the host in development.
-  const endpoint = /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
-    ? `${location.origin}/api/traefik/config`.replace(/\/\/(localhost|127\.0\.0\.1)/, "//host.docker.internal")
-    : "http://127.0.0.1:3000/api/traefik/config";
-  const providerSnippet = `providers:\n  http:\n    endpoint: "${endpoint}"\n    pollInterval: "5s"`;
+  // Traefik never connects to proxytail: it watches the config file proxytail writes, mounted read-only.
+  const providerSnippet = `providers:\n  file:\n    directory: "/dynamic"\n    watch: true`;
 
   return (
     <div className="max-w-3xl xl:max-w-none">
@@ -228,8 +225,8 @@ export function SettingsPage({
         <CardHeader>
           <CardTitle>Traefik</CardTitle>
           <CardDescription>
-            Traefik pulls its routing table from proxytail through the HTTP provider. It has to run inside the tailnet
-            (see <code className="font-mono">docker-compose.yml</code>) to reach 100.x addresses.
+            Traefik reads its routing table from the file proxytail writes, through the file provider. It runs on its
+            own tailnet node (see <code className="font-mono">docker-compose.yml</code>) to reach 100.x addresses.
           </CardDescription>
           <CardAction>
             {traefik?.reachable ? (

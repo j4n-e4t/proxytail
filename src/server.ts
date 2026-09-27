@@ -1,6 +1,6 @@
 import type { Server } from "bun";
 import index from "./web/index.html";
-import { authenticate, CAPABILITY, checkBrowserOrigin, isLocalService, type Role, type Session } from "./auth";
+import { authenticate, CAPABILITY, checkBrowserOrigin, type Role, type Session } from "./auth";
 import { domains as domainStore, hosts, settings, type BasicAuthUser, type ProxyHost, type ProxyHostInput } from "./db";
 import { checkDomain, detectPublicIp, publicAddress, requiredRecord } from "./dns";
 import { faviconFor } from "./favicons";
@@ -13,7 +13,7 @@ import {
   tailscaleConfig,
   TailscaleError,
 } from "./tailscale";
-import { buildConfig, traefikStatus } from "./traefik";
+import { buildConfig, traefikStatus, writeConfig } from "./traefik";
 
 class HttpError extends Error {
   constructor(
@@ -26,14 +26,8 @@ class HttpError extends Error {
 
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 
-/**
- * Who may call a route: a tailnet user with at least that role, or Traefik polling from loopback (admins can read its
- * config too; it contains basic auth hashes).
- */
-type Access = Role | "traefik";
-
-async function authorize(req: Request, server: Server<unknown>, access: Access): Promise<Session> {
-  if (access === "traefik" && isLocalService(req, server)) return { identity: null, role: null };
+/** Who may call a route: a tailnet user with at least that role. */
+async function authorize(req: Request, server: Server<unknown>, access: Role): Promise<Session> {
   const rejected = await checkBrowserOrigin(req);
   if (rejected) throw new HttpError(403, rejected);
   const session = await authenticate(req, server);
@@ -43,7 +37,7 @@ async function authorize(req: Request, server: Server<unknown>, access: Access):
   return session;
 }
 
-function handle<T extends Request>(access: Access, fn: (req: T, session: Session) => Promise<Response> | Response) {
+function handle<T extends Request>(access: Role, fn: (req: T, session: Session) => Promise<Response> | Response) {
   return async (req: T, server: Server<unknown>) => {
     try {
       return await fn(req, await authorize(req, server, access));
@@ -202,15 +196,25 @@ function settingsView() {
 
 const port = Number(process.env.PORT ?? 3000);
 
+// Traefik reads its routing table from a file (see writeConfig). Rewritten after every change and reconciled
+// periodically, which also retries failed writes.
+writeConfig();
+setInterval(writeConfig, 30_000);
+
 const server = Bun.serve({
   port,
-  hostname: process.env.HOST ?? "0.0.0.0",
+  // Loopback only: the UI is published on the tailnet by `tailscale serve` in the sidecar.
+  hostname: process.env.HOST ?? "127.0.0.1",
   routes: {
     "/*": index,
 
     "/api/hosts": {
       GET: handle("viewer", () => json(hosts.list().map(hostView))),
-      POST: handle("admin", async (req) => json(hostView(hosts.create(await validateHost(await body(req)))), 201)),
+      POST: handle("admin", async (req) => {
+        const h = hosts.create(await validateHost(await body(req)));
+        writeConfig();
+        return json(hostView(h), 201);
+      }),
     },
     "/api/hosts/:id/favicon": {
       GET: handle("viewer", async (req) => {
@@ -239,10 +243,13 @@ const server = Bun.serve({
         const existing = hosts.get(parseId(req.params.id));
         if (!existing) throw new HttpError(404, "Service not found");
         const patch = await body<Record<string, unknown>>(req);
-        return json(hostView(hosts.update(existing.id, await validateHost({ ...existing, ...patch }, existing))!));
+        const h = hosts.update(existing.id, await validateHost({ ...existing, ...patch }, existing))!;
+        writeConfig();
+        return json(hostView(h));
       }),
       DELETE: handle("admin", (req) => {
         if (!hosts.delete(parseId(req.params.id))) throw new HttpError(404, "Service not found");
+        writeConfig();
         return new Response(null, { status: 204 });
       }),
     },
@@ -324,8 +331,8 @@ const server = Bun.serve({
       },
     },
 
-    // Polled by Traefik's HTTP provider.
-    "/api/traefik/config": { GET: handle("traefik", () => json(buildConfig())) },
+    // The generated Traefik config, for admins only: it contains basic auth hashes.
+    "/api/traefik/config": { GET: handle("admin", () => json(buildConfig())) },
     "/api/traefik/status": { GET: handle("viewer", async () => json(await traefikStatus())) },
   },
   development: process.env.NODE_ENV !== "production" && { hmr: true, console: true },
