@@ -5,45 +5,44 @@ Cloudflare Tunnel or NetBird reverse proxy: a public hostname goes to Traefik, a
 Tailscale to a peer's `100.x` address.
 
 ```
-browser ──► app.example.com ──► Traefik (node proxytail-edge) ──► 100.x.y.z:port (a tailnet peer)
+browser ──► app.example.com ──► Traefik ──► host's tailscale0 ──► 100.x.y.z:port (a tailnet peer)
                                    ▲
-                                   │ watches the config file proxytail writes (file provider, read-only volume)
-                                proxytail (node proxytail, UI via tailscale serve)
+                                   │ polls /api/traefik/config every 5s (HTTP provider, Docker network)
+                                proxytail (this app) ◄── tailscale serve ◄── you, over the tailnet
 ```
 
-- **proxytail** (Bun + SQLite + React, shadcn/ui on Tailwind v4) stores your domains and services and lists tailnet
-  peers through its sidecar's tailscaled. It also writes Traefik's dynamic configuration.
-- **Traefik** runs in a separate network namespace with its own `tailscale/tailscale` sidecar, i.e. its own tailnet
-  node. It reaches peers directly, but can't reach proxytail: it never connects to it, and the UI only listens on
-  proxytail's loopback. See [Security model](#security-model).
+- **proxytail** (Bun + SQLite + React, shadcn/ui on Tailwind v4) stores your domains and services, lists tailnet peers
+  through the Tailscale API, and serves Traefik's dynamic configuration.
+- **Traefik** and proxytail run as containers on a private Docker network, on a dedicated proxy host that is itself on
+  your tailnet. Traefik reaches peers through the host's Tailscale, and proxytail's UI is only published on the host's
+  loopback, for `tailscale serve`.
+
+It's built for personal and homelab use: there are no user accounts, and whoever can reach the UI has full access. See
+[Security model](#security-model).
 
 ## Deploying
 
-The image is published to `ghcr.io/j4n-e4t/proxytail` for `linux/amd64` and `linux/arm64`.
+The image is published to `ghcr.io/j4n-e4t/proxytail` for `linux/amd64` and `linux/arm64`. The host needs Docker and
+tailscaled running in kernel mode (the default outside containers), so containers can route to `100.x` addresses.
 
 ```sh
-cp .env.example .env    # set TS_AUTHKEY
-docker compose up -d    # proxytail + Traefik, each with a Tailscale sidecar
+cp .env.example .env    # set TS_OAUTH_CLIENT_ID and TS_OAUTH_CLIENT_SECRET
+docker compose up -d    # proxytail + Traefik
+tailscale serve --bg --https=8443 http://127.0.0.1:3000
 ```
 
-- The UI is served on the tailnet only, at `https://<TS_HOSTNAME>.<tailnet>.ts.net`, through `tailscale serve` in the
-  sidecar with a Let's Encrypt certificate. Enable MagicDNS and HTTPS certificates for your tailnet first. proxytail
-  itself only listens on loopback. See [Access control](#access-control) for who can open it.
-- Traefik serves public traffic on ports 80 and 443 (`HTTP_PORT` and `HTTPS_PORT`), published by the
-  `tailscale-edge` sidecar. Port 80 is required for Let's Encrypt's HTTP-01 challenge and redirects all other requests
-  to HTTPS. Its API only listens on the internal `control` network, where proxytail reads router status from it.
-- Traefik reads its routing table from the `traefik-dynamic` volume, which proxytail writes and Traefik mounts
-  read-only. Changes go live within a second.
+- The UI is published on the host's loopback (`127.0.0.1:3000`, `UI_PORT`) only. `tailscale serve` puts it on the
+  tailnet at `https://<host>.<tailnet>.ts.net:8443` with a Let's Encrypt certificate; enable MagicDNS and HTTPS
+  certificates for your tailnet first. It uses 8443 because Traefik's published 443 is bound on every host address,
+  including the tailnet one. `--bg` keeps the configuration across reboots.
+- Traefik serves public traffic on ports 80 and 443 (`HTTP_PORT` and `HTTPS_PORT`). Port 80 is required for Let's
+  Encrypt's HTTP-01 challenge and redirects all other requests to HTTPS. Its API isn't published: proxytail reads
+  router status from it over the Docker network.
 - Every enabled service receives a Let's Encrypt certificate automatically. Keep port 80 reachable from the internet,
   point each hostname at the public address, and persist the `traefik-acme` volume so certificates survive restarts.
-- Two nodes join the tailnet: `proxytail` (the UI, `TS_AUTHKEY`) and `proxytail-edge` (Traefik, `TS_EDGE_AUTHKEY`,
-  falling back to `TS_AUTHKEY`). The edge node advertises `tag:proxytail-edge`, so its key must be allowed to apply
-  that tag: create `TS_EDGE_AUTHKEY` with that tag, or use an untagged key owned by one of the tag's `tagOwners`. Auth keys are only
-  needed on first start. Node identities are kept in the `tailscale-state` and `tailscale-edge-state` volumes, and app
-  data in `proxytail-data`.
-- Both containers run read-only, without capabilities, and Traefik as an unprivileged user. A one-shot
-  `volume-init` container hands the `traefik-acme` and `traefik-dynamic` volumes to that user, which also migrates
-  volumes from older versions.
+- Peers come from the Tailscale API through an OAuth client. Create one under **Settings → OAuth clients** in the admin
+  console with only the `devices:core:read` scope: a leaked secret then exposes your device list and nothing else.
+- Both containers run read-only and without capabilities, except for Traefik binding ports 80 and 443.
 - Pin a release with `PROXYTAIL_IMAGE=ghcr.io/j4n-e4t/proxytail:0.1.0`, or build locally with
   `docker compose up -d --build`.
 
@@ -54,90 +53,80 @@ Then, in the UI:
 2. **Domains:** add a domain and create the wildcard record it shows, e.g. `*.example.com A 203.0.113.10`. The domain is
    verified against public DNS resolvers.
 3. **Services:** pick a subdomain, a tailnet peer, and a port. The route goes live within about 5 seconds.
+4. Optionally, **Client CAs:** require client certificates for a service. See [Client certificates (mTLS)](#client-certificates-mtls).
 
 Only peers tagged `tag:proxytail-backend` are listed and can be targeted. Change the tag under **Settings** or with
 `TS_BACKEND_TAG`. Define the tag under `tagOwners` in your tailnet policy and apply it to each backend, e.g.
-`tailscale up --advertise-tags=tag:proxytail-backend`. The policy must allow both nodes to reach those peers: the edge
-node to proxy to them, and the proxytail node to list them and fetch their favicons. See [Security model](#security-model)
-for a policy.
+`tailscale up --advertise-tags=tag:proxytail-backend`. The policy must also allow the proxy host to reach those peers
+(see [Security model](#security-model)).
 
-Peers are read from the sidecar's tailscaled over its LocalAPI socket (`TS_SOCKET`, shared through the
-`tailscale-socket` volume), so no API credentials are needed. It only sees peers the tailnet policy lets the proxytail
-node reach.
+## Client certificates (mTLS)
 
-## Access control
+A service can require visitors to present a client certificate. Traefik checks it during the TLS handshake, before a
+request reaches the service, so only devices holding a certificate get through.
 
-There are no passwords or sessions. proxytail identifies every request with tailscaled's whois, using the client's
-Tailscale IP, and reads the caller's role from an app capability grant in your tailnet policy:
+1. **Client CAs:** generate a CA, or import the certificate of one you already use. proxytail keeps the key of a
+   generated CA, so you can issue client certificates from it: each one is downloaded once as a password-protected
+   `.p12` (for browsers, keychains and phones) and as PEM files (for `curl --cert … --key …`). Its private key isn't
+   stored. An imported CA only needs its certificate; you issue certificates for it wherever its key lives.
+2. **Services:** turn on **Client certificates**, pick the CAs to trust, and choose what happens without a
+   certificate: reject the handshake, or let the visitor through and verify a certificate only if one is presented.
+   **Forward certificate details** passes the subject, issuer, serial and validity to the service in the URL-encoded
+   `X-Forwarded-Tls-Client-Cert-Info` header, and drops any value the client sent in it.
 
-```json
-"grants": [
-  { "src": ["group:admins"], "dst": ["tag:proxytail"], "app": { "proxytail.dev/cap/ui": [{ "role": "admin" }] } },
-  { "src": ["autogroup:member"], "dst": ["tag:proxytail"], "app": { "proxytail.dev/cap/ui": [{ "role": "viewer" }] } }
-]
-```
-
-- `dst` is the proxytail node, here tagged with `TS_EXTRA_ARGS=--advertise-tags=tag:proxytail`. The same `src` also
-  needs network access to the node's port 443.
-- `admin` can change everything; `viewer` is read-only and can't see Traefik's generated config, which contains basic
-  auth hashes. Tailnet users without a grant see an access denied page with the grant to add.
-- Rename the capability with `TS_APP_CAPABILITY`.
-- `tailscale serve` connects from loopback and sets `X-Forwarded-For` to the client's Tailscale IP, replacing any
-  value the client sent. proxytail whois-es that IP, and only trusts the header on loopback connections. Only proxytail
-  and its own sidecar share that loopback; Traefik is in another network namespace.
-- `/api/traefik/config` shows the generated Traefik config to admins. Traefik itself doesn't use it.
-- The UI only answers to its IPs and MagicDNS names, which blocks DNS rebinding. Add other hostnames to `UI_HOSTS`.
-  Writes from another origin are rejected.
+Each service gets its own Traefik TLS option (`tls.options.proxytail-host-<id>`) with the CA certificates inlined, so
+nothing but the generated config is shared with Traefik. Traefik doesn't check revocation lists: a client certificate
+stays valid until it expires. To cut off a lost device, switch its services to a new CA and reissue the other
+certificates. A CA still used by a service can't be deleted.
 
 ## Security model
 
-Traefik is the only component exposed to the internet, so it's treated as the one most likely to be compromised:
+There are no accounts, passwords or sessions: **whoever can reach the UI has full access**, and access is controlled
+at the network layer. That's a deliberate trade-off for personal and homelab setups on a dedicated proxy host.
 
-- **It can't reach the UI.** Traefik runs in the `tailscale-edge` network namespace. proxytail only listens on the
-  loopback of the other namespace, and Traefik only reads its config from a read-only volume, so there's no connection
-  from Traefik to proxytail to abuse (e.g. by forging `X-Forwarded-For` to impersonate an admin).
-- **Its API is internal.** Traefik's unauthenticated API (routers, services, basic auth hashes) listens only on the
-  `control` network, which has no internet access and only the two sidecars attached. It isn't bound to the edge
-  node's tailnet or public interfaces.
-- **The tailnet policy limits what it reaches.** A compromised Traefik can reach whatever `tag:proxytail-edge` can,
-  and that tag is where to enforce containment. Grant it only the backend ports you proxy, and grant nothing *to* it:
+- **Who can open the UI** is decided by your tailnet policy: it's only reachable through `tailscale serve` on the
+  host. Grant the people who manage the proxy access to that port, and nobody else.
+- **Browsers can't be abused against it.** A page a tailnet user visits could otherwise make their browser call the
+  UI. proxytail rejects unknown `Host` headers, which blocks DNS rebinding, and rejects writes from other origins. It
+  answers to IPs, single-label names, `*.ts.net` and `*.internal` names; add other hostnames to `UI_HOSTS`.
+- **Traefik is internet-facing and can reach the UI** over the Docker network (it polls its config there). If Traefik
+  is compromised, so is proxytail. On a dedicated proxy host that adds little: whoever controls Traefik can already
+  reroute every service and reach everything the host can.
+- **The tailnet policy limits what the host reaches**, and with it Traefik. Tag the proxy host and grant it only the
+  backend ports you proxy:
 
 ```json
 "tagOwners": {
   "tag:proxytail":         ["group:admins"],
-  "tag:proxytail-edge":    ["group:admins"],
   "tag:proxytail-backend": ["group:admins"]
 },
 "grants": [
-  // The proxy: only the backend ports it serves.
-  { "src": ["tag:proxytail-edge"], "dst": ["tag:proxytail-backend"], "ip": ["tcp:80", "tcp:443"] },
-  // The UI node: peer listing and favicon fetches.
-  { "src": ["tag:proxytail"],      "dst": ["tag:proxytail-backend"], "ip": ["tcp:80", "tcp:443"] },
-  // Who may open the UI, and with which role.
-  { "src": ["group:admins"], "dst": ["tag:proxytail"], "ip": ["tcp:443"],
-    "app": { "proxytail.dev/cap/ui": [{ "role": "admin" }] } }
-  // No grant has tag:proxytail-edge as its dst.
+  // The proxy host: only the backend ports it serves.
+  { "src": ["tag:proxytail"], "dst": ["tag:proxytail-backend"], "ip": ["tcp:80", "tcp:443"] },
+  // Who may open the UI.
+  { "src": ["group:admins"], "dst": ["tag:proxytail"], "ip": ["tcp:8443"] }
 ]
 ```
 
-Traefik can still reach the internet (it needs to for Let's Encrypt), and it holds the certificates and basic auth
-hashes it serves.
+- **Traefik's API is unauthenticated** (routers, services, basic auth hashes), so it's only reachable on the Docker
+  network, like `/api/traefik/config`.
+
+Traefik can reach the internet (it needs to for Let's Encrypt), and it holds the certificates and basic auth hashes it
+serves. The keys of client CAs generated in the UI stay in proxytail's database (`proxytail-data`); Traefik only
+receives their certificates.
 
 ## Development
 
 ```sh
 bun install
 bun run dev                                     # UI on http://localhost:3000 (hot reload)
-docker compose -f docker-compose.dev.yml up -d  # Traefik + Tailscale sidecar, pointed at the app on the host
+docker compose -f docker-compose.dev.yml up -d  # Traefik, pointed at the app on the host
 ```
 
-- The dev Traefik polls `/api/traefik/config` over HTTP instead of using the file provider, because Docker Desktop's
-  bind mounts don't deliver file change events. Its API is published on `127.0.0.1:8080` only.
-- The app listens on `127.0.0.1` by default. Docker Desktop forwards `host.docker.internal` to it; with Docker on
-  Linux, set `HOST` to the `docker0` address (not `0.0.0.0`: with `UI_AUTH=off` everyone who can connect is an admin).
-
-- `bun run dev` sets `UI_AUTH=off`, since there's no tailscaled socket on the host to identify users with. Every
-  request is an admin, so never set it in production. Peers come from `TS_MOCK_DEVICES`.
+- The dev Traefik polls the app through `host.docker.internal` and reaches peers through your machine's Tailscale.
+  Its API is published on `127.0.0.1:8080` only.
+- The app listens on `127.0.0.1` by default, and has no login. Docker Desktop forwards `host.docker.internal` to it;
+  with Docker on Linux, set `HOST` to the `docker0` address (not `0.0.0.0`, which would open it to your network).
 - `docker compose -f docker-compose.dev.yml --profile demo up -d` adds an ephemeral `proxytail-demo` peer running
   `demo/server.ts` on port 80, which is useful as a first target. Like `traefik/whoami`, it echoes each request, as a
   page with its own favicon.

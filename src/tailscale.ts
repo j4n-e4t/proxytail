@@ -1,8 +1,6 @@
-import { existsSync } from "node:fs";
 import { hosts, settings } from "./db";
 
-/** tailscaled's LocalAPI socket, shared with the sidecar through a volume in docker-compose.yml. */
-const SOCKET = process.env.TS_SOCKET || "/var/run/tailscale/tailscaled.sock";
+const API = "https://api.tailscale.com/api/v2";
 const DEVICE_CACHE_MS = 15_000;
 const DEFAULT_BACKEND_TAG = "tag:proxytail-backend";
 
@@ -30,9 +28,15 @@ export class TailscaleError extends Error {
   }
 }
 
-/** Resolved settings: values saved in the UI win over environment variables. */
+/**
+ * Peers are listed through the Tailscale API with an OAuth client. It only needs the read-only `devices:core:read`
+ * scope, so a leaked secret exposes the device list and nothing else. Credentials only come from the environment.
+ */
 export function tailscaleConfig() {
   return {
+    tailnet: process.env.TS_TAILNET || "-",
+    oauthClientId: process.env.TS_OAUTH_CLIENT_ID || "",
+    oauthClientSecret: process.env.TS_OAUTH_CLIENT_SECRET || "",
     /** Only peers carrying this ACL tag are listed and can be targeted. */
     backendTag: settings.get("backend_tag") || process.env.TS_BACKEND_TAG || DEFAULT_BACKEND_TAG,
   };
@@ -44,93 +48,38 @@ export function normalizeTag(raw: string): string | null {
   return /^[a-zA-Z][a-zA-Z0-9-]*$/.test(tag) ? `tag:${tag}` : null;
 }
 
-/**
- * Where peers are listed from: a mock file, or the local tailscaled, which only sees peers the tailnet policy lets
- * this node reach.
- */
-export type DeviceSource = "mock" | "local";
+/** Where peers are listed from: a mock file, or the Tailscale API. */
+export type DeviceSource = "mock" | "api";
 
 export function deviceSource(): DeviceSource | null {
   if (process.env.TS_MOCK_DEVICES) return "mock";
-  return existsSync(SOCKET) ? "local" : null;
+  const c = tailscaleConfig();
+  return c.oauthClientId && c.oauthClientSecret ? "api" : null;
 }
 
 export function isConfigured() {
   return deviceSource() !== null;
 }
 
-/** Calls tailscaled's LocalAPI over its unix socket. */
-async function localApi(path: string): Promise<Response> {
-  try {
-    // The LocalAPI rejects other Host headers (DNS rebinding protection).
-    return await fetch(`http://local-tailscaled.sock/localapi/v0/${path}`, {
-      unix: SOCKET,
-      signal: AbortSignal.timeout(5000),
-    });
-  } catch (e) {
-    throw new TailscaleError(`Can't reach tailscaled at ${SOCKET}: ${(e as Error).message}`, 503);
-  }
+let oauthToken: { token: string; expiresAt: number } | null = null;
+
+async function authorization(): Promise<string> {
+  if (oauthToken && oauthToken.expiresAt > Date.now() + 60_000) return `Bearer ${oauthToken.token}`;
+  const c = tailscaleConfig();
+  if (!c.oauthClientId || !c.oauthClientSecret)
+    throw new TailscaleError("Set TS_OAUTH_CLIENT_ID and TS_OAUTH_CLIENT_SECRET to list peers", 503);
+  const res = await fetch(`${API}/oauth/token`, {
+    method: "POST",
+    body: new URLSearchParams({ client_id: c.oauthClientId, client_secret: c.oauthClientSecret }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) throw new TailscaleError(`OAuth token exchange failed (${res.status}): ${await res.text()}`);
+  const body = (await res.json()) as { access_token: string; expires_in: number };
+  oauthToken = { token: body.access_token, expiresAt: Date.now() + body.expires_in * 1000 };
+  return `Bearer ${body.access_token}`;
 }
 
-interface LocalPeer {
-  ID: string;
-  HostName: string;
-  DNSName: string;
-  OS: string;
-  UserID: number;
-  TailscaleIPs?: string[];
-  Tags?: string[];
-  Online?: boolean;
-  LastSeen?: string;
-}
-
-interface LocalStatus {
-  Self: LocalPeer;
-  Peer?: Record<string, LocalPeer>;
-  User?: Record<string, { LoginName: string }>;
-  CurrentTailnet?: { MagicDNSSuffix: string } | null;
-}
-
-export async function localStatus(): Promise<LocalStatus> {
-  const res = await localApi("status");
-  if (!res.ok) throw new TailscaleError(`tailscaled returned ${res.status}: ${await res.text()}`);
-  return (await res.json()) as LocalStatus;
-}
-
-/** Converts the LocalAPI's peer list to the Tailscale API's device format. */
-function fromStatus(s: LocalStatus): ApiDevice[] {
-  return Object.values(s.Peer ?? {}).map((p) => ({
-    // StableNodeID: the same value as `nodeId` in the Tailscale API, so stored services keep matching.
-    id: p.ID,
-    name: p.DNSName.replace(/\.$/, "") || p.HostName,
-    hostname: p.HostName,
-    addresses: p.TailscaleIPs ?? [],
-    os: p.OS,
-    user: s.User?.[p.UserID]?.LoginName ?? "",
-    tags: p.Tags,
-    // Online peers report the zero time.
-    lastSeen: p.LastSeen && !p.LastSeen.startsWith("0001-") ? p.LastSeen : undefined,
-    connectedToControl: !!p.Online,
-  }));
-}
-
-export interface WhoIs {
-  Node: { Name: string; Tags?: string[] };
-  UserProfile: { LoginName: string; DisplayName: string; ProfilePicURL?: string };
-  /** App capabilities granted to this peer through `grants[].app` in the tailnet policy. */
-  CapMap?: Record<string, unknown[] | null>;
-}
-
-/** Identifies the tailnet peer behind a Tailscale IP, or returns null if it isn't one. */
-export async function whois(ip: string, port = 0): Promise<WhoIs | null> {
-  const addr = ip.includes(":") ? `[${ip}]:${port}` : `${ip}:${port}`;
-  const res = await localApi(`whois?addr=${encodeURIComponent(addr)}`);
-  if (res.status === 404 || res.status === 400) return null;
-  if (!res.ok) throw new TailscaleError(`tailscaled whois returned ${res.status}: ${await res.text()}`);
-  return (await res.json()) as WhoIs;
-}
-
-/** A device in the Tailscale API's format, used by mock files and converted from the LocalAPI's status. */
+/** A device in the Tailscale API's format, also used by mock files. */
 interface ApiDevice {
   id: string;
   nodeId?: string;
@@ -167,11 +116,19 @@ function normalize(d: ApiDevice): Device {
 }
 
 async function fetchDevices(): Promise<Device[]> {
-  const raw: ApiDevice[] =
-    deviceSource() === "mock"
-      ? // Development aid: a JSON file in the Tailscale API's `{ devices: [...] }` format.
-        (await Bun.file(process.env.TS_MOCK_DEVICES!).json()).devices
-      : fromStatus(await localStatus());
+  let raw: ApiDevice[];
+  if (deviceSource() === "mock") {
+    // Development aid: a JSON file in the Tailscale API's `{ devices: [...] }` format.
+    raw = (await Bun.file(process.env.TS_MOCK_DEVICES!).json()).devices;
+  } else {
+    const { tailnet } = tailscaleConfig();
+    const res = await fetch(`${API}/tailnet/${encodeURIComponent(tailnet)}/devices?fields=all`, {
+      headers: { Authorization: await authorization() },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new TailscaleError(`Tailscale API returned ${res.status}: ${await res.text()}`);
+    raw = ((await res.json()) as { devices: ApiDevice[] }).devices;
+  }
   const { backendTag } = tailscaleConfig();
   return raw
     .filter((d) => d.tags?.includes(backendTag))
@@ -198,4 +155,5 @@ export async function listDevices(force = false): Promise<Device[]> {
 
 export function clearDeviceCache() {
   cache = null;
+  oauthToken = null;
 }

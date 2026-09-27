@@ -1,27 +1,12 @@
-# Development stack: Traefik + Tailscale sidecar in Docker, proxytail running on the host (`bun run dev`).
-# Unlike production, Traefik polls the dev app's /api/traefik/config over HTTP: Docker Desktop's bind mounts don't
-# deliver file change events, so the file provider wouldn't see updates. That endpoint is admin-only, which works
-# here because `bun run dev` sets UI_AUTH=off.
+# Development stack: Traefik in Docker, proxytail running on the host (`bun run dev`). Like production, Traefik reaches
+# tailnet peers through the host's Tailscale (Docker Desktop sends container traffic through the host's network stack).
 #   docker compose -f docker-compose.dev.yml up -d
 #   docker compose -f docker-compose.dev.yml --profile demo up -d   # + an ephemeral whoami test peer
 name: proxytail
 
 services:
-  tailscale:
-    image: tailscale/tailscale:latest
-    hostname: ${TS_HOSTNAME:-proxytail}
-    environment:
-      TS_AUTHKEY: ${TS_AUTHKEY:-}
-      TS_STATE_DIR: /var/lib/tailscale
-      TS_USERSPACE: "false"
-      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
-    volumes:
-      - tailscale-state:/var/lib/tailscale
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
+  traefik:
+    image: traefik:v3.5
     extra_hosts:
       - host.docker.internal:host-gateway
     ports:
@@ -29,18 +14,8 @@ services:
       - "${HTTPS_PORT:-443}:443"
       # Traefik's API, for the app on the host. Loopback only on the host side.
       - "127.0.0.1:${TRAEFIK_DASHBOARD_PORT:-8080}:8080"
-    networks:
-      edge:
-        ipv4_address: 172.31.254.2
-    restart: unless-stopped
-
-  traefik:
-    image: traefik:v3.5
-    network_mode: service:tailscale
     volumes:
       - traefik-acme:/letsencrypt
-    depends_on:
-      - tailscale
     command:
       - --entrypoints.web.address=:80
       # All HTTP traffic is redirected to HTTPS (ACME HTTP-01 challenges on :80 are still answered first).
@@ -55,9 +30,7 @@ services:
       - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
       - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-}
       - --certificatesresolvers.letsencrypt.acme.caserver=${ACME_CA_SERVER:-https://acme-staging-v02.api.letsencrypt.org/directory}
-      # Bound to the bridge address only (port publishing forwards there), not the tailnet interface.
       - --api.insecure=true
-      - --entrypoints.traefik.address=172.31.254.2:8080
       - --providers.http.endpoint=http://host.docker.internal:${PORT:-3000}/api/traefik/config
       - --providers.http.pollInterval=5s
       - --log.level=INFO
@@ -94,12 +67,5 @@ services:
       - demo-tailscale
     restart: unless-stopped
 
-networks:
-  edge:
-    ipam:
-      config:
-        - subnet: 172.31.254.0/29
-
 volumes:
-  tailscale-state:
   traefik-acme:

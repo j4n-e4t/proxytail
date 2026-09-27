@@ -1,5 +1,17 @@
 import { useState, type FormEvent } from "react";
-import { ArrowLeft, ArrowRight, Globe, KeyRound, Loader2, Plus, Server, Trash2, X, type LucideIcon } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Globe,
+  KeyRound,
+  Loader2,
+  Plus,
+  Server,
+  ShieldCheck,
+  Trash2,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -16,15 +28,26 @@ import { DevicePicker } from "@/components/device-picker";
 import { OsIcon } from "@/components/os-icon";
 import { PageHeader } from "@/components/page-header";
 import { serviceState, StateTile } from "@/components/status";
-import { api, type Device, type Domain, type ProxyHost, type ProxyHostDraft, type TraefikStatus } from "@/lib/api";
+import {
+  api,
+  type ClientAuth,
+  type ClientCa,
+  type Device,
+  type Domain,
+  type ProxyHost,
+  type ProxyHostDraft,
+  type TraefikStatus,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface EditorProps {
   devices: Device[];
   peerTag: string;
   domains: Domain[] | null;
+  clientCas: ClientCa[] | null;
   traefik: TraefikStatus | null;
   onOpenDomains: () => void;
+  onOpenClientCas: () => void;
   onCancel: () => void;
   onSaved: () => void;
 }
@@ -33,7 +56,7 @@ interface EditorProps {
 export function ServiceEditorPage(
   props: EditorProps & { hosts: ProxyHost[] | null; hostId: number | null; initialDeviceId?: string },
 ) {
-  if (props.domains === null || (props.hostId !== null && props.hosts === null)) {
+  if (props.domains === null || props.clientCas === null || (props.hostId !== null && props.hosts === null)) {
     return (
       <div className="max-w-3xl space-y-4">
         <Skeleton className="h-10 w-64" />
@@ -57,6 +80,7 @@ export function ServiceEditorPage(
       key={existing?.id ?? "new"}
       {...props}
       domains={props.domains}
+      clientCas={props.clientCas}
       existing={existing ?? null}
       initialDeviceId={props.initialDeviceId}
     />
@@ -99,7 +123,7 @@ interface UserRow {
 let nextKey = 0;
 
 function ServiceForm(
-  props: EditorProps & { domains: Domain[]; existing: ProxyHost | null; initialDeviceId?: string },
+  props: EditorProps & { domains: Domain[]; clientCas: ClientCa[]; existing: ProxyHost | null; initialDeviceId?: string },
 ) {
   const { existing } = props;
   const verified = props.domains.filter((d) => d.verified);
@@ -118,6 +142,16 @@ function ServiceForm(
   const [users, setUsers] = useState<UserRow[]>(
     () => existing?.basicAuthUsers.map((u) => ({ key: nextKey++, username: u.username, password: "", previous: u.username })) ?? [],
   );
+  const [clientAuth, setClientAuth] = useState<ClientAuth>(existing?.clientAuth ?? "off");
+  // Preselect the only CA, the common case.
+  const [caIds, setCaIds] = useState<number[]>(() =>
+    existing?.clientCaIds.length
+      ? existing.clientCaIds
+      : props.clientCas.length === 1
+        ? [props.clientCas[0]!.id]
+        : [],
+  );
+  const [certHeaders, setCertHeaders] = useState(existing?.clientCertHeaders ?? false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -144,6 +178,7 @@ function ServiceForm(
     setError(null);
     if (!deviceId) return setError("Pick the tailnet peer that runs this service.");
     if (rows.some((r) => !r.base)) return setError("Pick a domain for every hostname.");
+    if (clientAuth !== "off" && !caIds.length) return setError("Pick a CA to verify client certificates against.");
     const draft: ProxyHostDraft = {
       domains: rows.map(joinHostname),
       deviceId,
@@ -154,6 +189,9 @@ function ServiceForm(
       basicAuth,
       healthCheck,
       healthCheckPath: healthPath.trim() || "/",
+      clientAuth,
+      clientCaIds: clientAuth === "off" ? [] : caIds,
+      clientCertHeaders: clientAuth !== "off" && certHeaders,
       basicAuthUsers: users
         .filter((u) => u.username.trim() || u.password)
         .map((u) => ({ username: u.username.trim(), password: u.password || undefined, previous: u.previous })),
@@ -423,6 +461,103 @@ function ServiceForm(
 
         <Card>
           <CardHeader>
+            <CardTitle>Client certificates</CardTitle>
+            <CardDescription>
+              Mutual TLS: Traefik asks visitors for a certificate signed by one of your CAs during the TLS handshake,
+              before any request reaches the service.
+            </CardDescription>
+            <CardAction>
+              <Switch
+                checked={clientAuth !== "off"}
+                onCheckedChange={(on) => setClientAuth(on ? "require" : "off")}
+                aria-label="Verify client certificates"
+              />
+            </CardAction>
+          </CardHeader>
+          {clientAuth !== "off" && (
+            <CardContent className="space-y-4">
+              {props.clientCas.length === 0 ? (
+                <div className="flex items-center justify-between gap-4 rounded-lg border border-dashed p-4">
+                  <p className="text-sm text-muted-foreground">You haven't added a client CA yet.</p>
+                  <Button type="button" variant="outline" size="sm" onClick={props.onOpenClientCas}>
+                    <ShieldCheck /> Manage client CAs
+                  </Button>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <Label>Trusted CAs</Label>
+                  <div className="divide-y rounded-lg border">
+                    {props.clientCas.map((ca) => {
+                      const id = `ca-${ca.id}`;
+                      const expired = new Date(ca.summary.notAfter).getTime() < Date.now();
+                      return (
+                        <label key={ca.id} htmlFor={id} className="flex cursor-pointer items-center gap-3 px-3 py-2.5">
+                          <Checkbox
+                            id={id}
+                            checked={caIds.includes(ca.id)}
+                            onCheckedChange={(v) =>
+                              setCaIds((ids) => (v === true ? [...ids, ca.id] : ids.filter((x) => x !== ca.id)))
+                            }
+                          />
+                          <div className="min-w-0 flex-1 leading-tight">
+                            <p className="truncate text-sm font-medium">{ca.name}</p>
+                            <p className="truncate text-xs text-muted-foreground">
+                              CN={ca.summary.subject} · {ca.generated ? `${ca.clientCerts.length} issued` : "imported"}
+                            </p>
+                          </div>
+                          {expired && <span className="text-xs text-destructive">Expired</span>}
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Any certificate signed by a checked CA is accepted.{" "}
+                    <button type="button" className="underline" onClick={props.onOpenClientCas}>
+                      Manage client CAs
+                    </button>
+                  </p>
+                </div>
+              )}
+              <div className="grid gap-2">
+                <Label>Visitors without a valid certificate</Label>
+                <Select value={clientAuth} onValueChange={(v) => setClientAuth(v as ClientAuth)}>
+                  <SelectTrigger className="h-10! w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="require">Are rejected during the handshake</SelectItem>
+                    <SelectItem value="optional">Get through; certificates are verified if presented</SelectItem>
+                  </SelectContent>
+                </Select>
+                {clientAuth === "optional" && (
+                  <p className="text-xs text-muted-foreground">
+                    Useful when the service decides itself, e.g. by forwarding the certificate details below. Invalid
+                    certificates are still rejected.
+                  </p>
+                )}
+              </div>
+              <div className="flex items-start gap-3 border-t pt-4">
+                <Checkbox
+                  id="cert-headers"
+                  checked={certHeaders}
+                  onCheckedChange={(v) => setCertHeaders(v === true)}
+                  className="mt-0.5"
+                />
+                <div className="space-y-1">
+                  <Label htmlFor="cert-headers">Forward certificate details</Label>
+                  <p className="text-sm text-muted-foreground">
+                    Pass the verified certificate's subject, issuer, serial and validity to the service in the{" "}
+                    <code className="font-mono text-xs">X-Forwarded-Tls-Client-Cert-Info</code> header (URL-encoded).
+                    A value sent by the client is always dropped.
+                  </p>
+                </div>
+              </div>
+            </CardContent>
+          )}
+        </Card>
+
+        <Card>
+          <CardHeader>
             <CardTitle>Advanced</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -476,6 +611,12 @@ function ServiceForm(
                       ? `Basic auth · ${users.length} ${users.length === 1 ? "user" : "users"}`
                       : "No login required"}
                   </li>
+                  {clientAuth !== "off" && (
+                    <li>
+                      {clientAuth === "require" ? "Client certificate required" : "Client certificate checked if sent"} ·{" "}
+                      {caIds.length} {caIds.length === 1 ? "CA" : "CAs"}
+                    </li>
+                  )}
                   <li className={cn(!healthCheck && "text-muted-foreground")}>
                     {healthCheck ? (
                       <>

@@ -71,7 +71,8 @@ export function PeersPage(props: {
           <div className="space-y-1">
             <p className="font-medium">Connect your tailnet</p>
             <p className="max-w-sm text-sm text-muted-foreground">
-              Share tailscaled's socket with proxytail to list the peers you can route to.
+              Set <code className="font-mono">TS_OAUTH_CLIENT_ID</code> and{" "}
+              <code className="font-mono">TS_OAUTH_CLIENT_SECRET</code> to list the peers you can route to.
             </p>
           </div>
           <Button onClick={props.onOpenSettings} className="mt-2">

@@ -1,9 +1,20 @@
-import type { Server } from "bun";
 import index from "./web/index.html";
-import { authenticate, CAPABILITY, checkBrowserOrigin, type Role, type Session } from "./auth";
-import { domains as domainStore, hosts, settings, type BasicAuthUser, type ProxyHost, type ProxyHostInput } from "./db";
+import { checkBrowserOrigin } from "./guard";
+import {
+  clientCas,
+  clientCerts,
+  domains as domainStore,
+  hosts,
+  settings,
+  type BasicAuthUser,
+  type ClientAuth,
+  type ClientCa,
+  type ProxyHost,
+  type ProxyHostInput,
+} from "./db";
 import { checkDomain, detectPublicIp, publicAddress, requiredRecord } from "./dns";
 import { faviconFor } from "./favicons";
+import { generateCa, issueClientCert, parseCaBundle, PkiError } from "./pki";
 import {
   clearDeviceCache,
   deviceSource,
@@ -13,7 +24,7 @@ import {
   tailscaleConfig,
   TailscaleError,
 } from "./tailscale";
-import { buildConfig, traefikStatus, writeConfig } from "./traefik";
+import { buildConfig, traefikStatus } from "./traefik";
 
 class HttpError extends Error {
   constructor(
@@ -26,23 +37,16 @@ class HttpError extends Error {
 
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 
-/** Who may call a route: a tailnet user with at least that role. */
-async function authorize(req: Request, server: Server<unknown>, access: Role): Promise<Session> {
-  const rejected = await checkBrowserOrigin(req);
-  if (rejected) throw new HttpError(403, rejected);
-  const session = await authenticate(req, server);
-  if (!session.role) throw new HttpError(403, session.reason ?? "Access denied");
-  if (access !== "viewer" && session.role !== "admin")
-    throw new HttpError(403, `Read-only access: this needs the admin role in ${CAPABILITY}`);
-  return session;
-}
-
-function handle<T extends Request>(access: Role, fn: (req: T, session: Session) => Promise<Response> | Response) {
-  return async (req: T, server: Server<unknown>) => {
+/** Every API route: no authentication (see guard.ts), only the browser checks. */
+function handle<T extends Request>(fn: (req: T) => Promise<Response> | Response) {
+  return async (req: T) => {
     try {
-      return await fn(req, await authorize(req, server, access));
+      const rejected = checkBrowserOrigin(req);
+      if (rejected) throw new HttpError(403, rejected);
+      return await fn(req);
     } catch (e) {
       if (e instanceof HttpError || e instanceof TailscaleError) return json({ error: e.message }, e.status);
+      if (e instanceof PkiError) return json({ error: e.message }, 400);
       console.error(e);
       return json({ error: "Internal server error" }, 500);
     }
@@ -123,6 +127,16 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
   if (!healthCheckPath.startsWith("/") || /\s/.test(healthCheckPath))
     throw new HttpError(400, "Health check path must start with / and contain no spaces");
 
+  const clientAuth = (raw.clientAuth ?? "off") as ClientAuth;
+  if (!["off", "require", "optional"].includes(clientAuth))
+    throw new HttpError(400, "Client certificates must be off, require or optional");
+  const clientCaIds =
+    clientAuth === "off" || !Array.isArray(raw.clientCaIds) ? [] : [...new Set<number>(raw.clientCaIds.map(Number))];
+  if (clientAuth !== "off") {
+    if (!clientCaIds.length) throw new HttpError(400, "Pick at least one CA to verify client certificates against");
+    for (const id of clientCaIds) if (!clientCas.get(id)) throw new HttpError(400, `Client CA ${id} does not exist`);
+  }
+
   return {
     domains: [...new Set(domains)],
     deviceId,
@@ -136,6 +150,9 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
     basicAuthUsers,
     healthCheck,
     healthCheckPath,
+    clientAuth,
+    clientCaIds,
+    clientCertHeaders: clientAuth !== "off" && !!raw.clientCertHeaders,
   };
 }
 
@@ -183,6 +200,39 @@ function domainView(d: ReturnType<typeof domainStore.list>[number]) {
   };
 }
 
+/** CAs as returned by the API: the private key never leaves the server. */
+function caView(ca: ClientCa, all = hosts.list(), certs = clientCerts.list()) {
+  const { keyPem, ...rest } = ca;
+  return {
+    ...rest,
+    generated: !!keyPem,
+    hostIds: all.filter((h) => h.clientAuth !== "off" && h.clientCaIds.includes(ca.id)).map((h) => h.id),
+    clientCerts: certs.filter((c) => c.caId === ca.id),
+  };
+}
+
+function getCa(raw: string) {
+  const ca = clientCas.get(parseId(raw));
+  if (!ca) throw new HttpError(404, "CA not found");
+  return ca;
+}
+
+function validateName(raw: unknown, what: string) {
+  const name = String(raw ?? "").trim();
+  if (!name || name.length > 64 || /[\x00-\x1f]/.test(name))
+    throw new HttpError(400, `${what} must be 1 to 64 characters`);
+  return name;
+}
+
+function validateDays(raw: unknown, max: number) {
+  const days = Number(raw);
+  if (!Number.isInteger(days) || days < 1 || days > max) throw new HttpError(400, `Validity must be 1 to ${max} days`);
+  return days;
+}
+
+/** A file name derived from a certificate name. */
+const fileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-|-$/g, "") || "certificate";
+
 function settingsView() {
   const c = tailscaleConfig();
   return {
@@ -196,28 +246,24 @@ function settingsView() {
 
 const port = Number(process.env.PORT ?? 3000);
 
-// Traefik reads its routing table from a file (see writeConfig). Rewritten after every change and reconciled
-// periodically, which also retries failed writes.
-writeConfig();
-setInterval(writeConfig, 30_000);
 
 const server = Bun.serve({
   port,
-  // Loopback only: the UI is published on the tailnet by `tailscale serve` in the sidecar.
+  // Loopback by default: whoever can connect has full access. docker-compose.yml listens on the container's network
+  // and publishes the port on the host's loopback only, for `tailscale serve`.
   hostname: process.env.HOST ?? "127.0.0.1",
   routes: {
     "/*": index,
 
     "/api/hosts": {
-      GET: handle("viewer", () => json(hosts.list().map(hostView))),
-      POST: handle("admin", async (req) => {
+      GET: handle(() => json(hosts.list().map(hostView))),
+      POST: handle(async (req) => {
         const h = hosts.create(await validateHost(await body(req)));
-        writeConfig();
         return json(hostView(h), 201);
       }),
     },
     "/api/hosts/:id/favicon": {
-      GET: handle("viewer", async (req) => {
+      GET: handle(async (req) => {
         const h = hosts.get(parseId(req.params.id));
         if (!h) throw new HttpError(404, "Service not found");
         const icon = await faviconFor(h);
@@ -234,29 +280,27 @@ const server = Bun.serve({
       }),
     },
     "/api/hosts/:id": {
-      GET: handle("viewer", (req) => {
+      GET: handle((req) => {
         const h = hosts.get(parseId(req.params.id));
         if (!h) throw new HttpError(404, "Service not found");
         return json(hostView(h));
       }),
-      PUT: handle("admin", async (req) => {
+      PUT: handle(async (req) => {
         const existing = hosts.get(parseId(req.params.id));
         if (!existing) throw new HttpError(404, "Service not found");
         const patch = await body<Record<string, unknown>>(req);
         const h = hosts.update(existing.id, await validateHost({ ...existing, ...patch }, existing))!;
-        writeConfig();
         return json(hostView(h));
       }),
-      DELETE: handle("admin", (req) => {
+      DELETE: handle((req) => {
         if (!hosts.delete(parseId(req.params.id))) throw new HttpError(404, "Service not found");
-        writeConfig();
         return new Response(null, { status: 204 });
       }),
     },
 
     "/api/domains": {
-      GET: handle("viewer", () => json(domainStore.list().map(domainView))),
-      POST: handle("admin", async (req) => {
+      GET: handle(() => json(domainStore.list().map(domainView))),
+      POST: handle(async (req) => {
         const name = String((await body<{ name?: string }>(req)).name ?? "")
           .trim()
           .toLowerCase()
@@ -271,14 +315,14 @@ const server = Bun.serve({
       }),
     },
     "/api/domains/:id/verify": {
-      POST: handle("admin", async (req) => {
+      POST: handle(async (req) => {
         const d = domainStore.get(parseId(req.params.id));
         if (!d) throw new HttpError(404, "Domain not found");
         return json(domainView(domainStore.saveCheck(d.id, await checkDomain(d.name))));
       }),
     },
     "/api/domains/:id": {
-      DELETE: handle("admin", (req) => {
+      DELETE: handle((req) => {
         const d = domainStore.get(parseId(req.params.id));
         if (!d) throw new HttpError(404, "Domain not found");
         const used = hosts.list().filter((h) => h.domains.some((x) => domainStore.match(x)?.id === d.id));
@@ -289,13 +333,93 @@ const server = Bun.serve({
       }),
     },
 
+    "/api/client-cas": {
+      GET: handle(() => {
+        const all = hosts.list();
+        const certs = clientCerts.list();
+        return json(clientCas.list().map((ca) => caView(ca, all, certs)));
+      }),
+      POST: handle(async (req) => {
+        const b = await body<{ mode?: string; name?: string; days?: number; pem?: string }>(req);
+        const name = validateName(b.name, "Name");
+        if (b.mode === "generate") {
+          const ca = await generateCa(name, validateDays(b.days ?? 3650, 7300));
+          const created = clientCas.create({ name, certPem: ca.certPem, keyPem: ca.keyPem, summary: ca.summary, certCount: 1 });
+          return json(caView(created), 201);
+        }
+        if (b.mode === "import") {
+          const bundle = parseCaBundle(String(b.pem ?? ""));
+          const created = clientCas.create({
+            name,
+            certPem: bundle.pem,
+            keyPem: null,
+            summary: bundle.summary,
+            certCount: bundle.count,
+          });
+          return json(caView(created), 201);
+        }
+        throw new HttpError(400, "Mode must be generate or import");
+      }),
+    },
+    "/api/client-cas/:id": {
+      PATCH: handle(async (req) => {
+        const ca = getCa(req.params.id);
+        return json(caView(clientCas.rename(ca.id, validateName((await body<{ name?: string }>(req)).name, "Name"))!));
+      }),
+      DELETE: handle((req) => {
+        const ca = getCa(req.params.id);
+        const used = hosts.list().filter((h) => h.clientAuth !== "off" && h.clientCaIds.includes(ca.id));
+        if (used.length)
+          throw new HttpError(409, `${ca.name} is used by ${used.map((h) => h.domains[0]).join(", ")}. Remove it from those services first.`);
+        clientCas.delete(ca.id);
+        return new Response(null, { status: 204 });
+      }),
+    },
+    // The CA certificate, public by nature: to install it wherever client certificates are verified or issued.
+    "/api/client-cas/:id/cert.pem": {
+      GET: handle((req) => {
+        const ca = getCa(req.params.id);
+        return new Response(ca.certPem, {
+          headers: {
+            "Content-Type": "application/x-pem-file",
+            "Content-Disposition": `attachment; filename="${fileName(ca.name)}.pem"`,
+          },
+        });
+      }),
+    },
+    "/api/client-cas/:id/certs": {
+      POST: handle(async (req) => {
+        const ca = getCa(req.params.id);
+        if (!ca.keyPem) throw new HttpError(400, `${ca.name} was imported without its key, so it can't issue certificates`);
+        const b = await body<{ commonName?: string; days?: number; password?: string }>(req);
+        const commonName = validateName(b.commonName, "Common name");
+        const days = validateDays(b.days ?? 365, 3650);
+        const password = typeof b.password === "string" ? b.password : "";
+        if (password.length < MIN_PASSWORD)
+          throw new HttpError(400, `The PKCS#12 password must be at least ${MIN_PASSWORD} characters`);
+        const issued = await issueClientCert({ certPem: ca.certPem, keyPem: ca.keyPem }, commonName, days, password);
+        const cert = clientCerts.create(ca.id, issued.summary);
+        // The key is returned once and not stored.
+        return json(
+          { cert, fileName: fileName(commonName), p12: issued.p12, certPem: issued.certPem, keyPem: issued.keyPem },
+          201,
+        );
+      }),
+    },
+    "/api/client-certs/:id": {
+      DELETE: handle((req) => {
+        if (!clientCerts.delete(parseId(req.params.id))) throw new HttpError(404, "Certificate not found");
+        return new Response(null, { status: 204 });
+      }),
+    },
+
     "/api/devices": {
-      GET: handle("viewer", async (req) => json(await listDevices(new URL(req.url).searchParams.has("refresh")))),
+      GET: handle(async (req) => json(await listDevices(new URL(req.url).searchParams.has("refresh")))),
     },
 
     "/api/settings": {
-      GET: handle("viewer", () => json(settingsView())),
-      PUT: handle("admin", async (req) => {
+      GET: handle(() => json(settingsView())),
+      PUT: handle(async (req) => {
         const b = await body<Record<string, string | null | undefined>>(req);
         // `undefined` leaves a value untouched, `null`/"" clears it (falls back to env).
         if (b.publicAddress !== undefined) settings.set("public_address", b.publicAddress?.trim() ?? null);
@@ -310,10 +434,10 @@ const server = Bun.serve({
       }),
     },
     "/api/settings/detect-ip": {
-      POST: handle("admin", async () => json({ ip: await detectPublicIp() })),
+      POST: handle(async () => json({ ip: await detectPublicIp() })),
     },
     "/api/settings/test": {
-      POST: handle("viewer", async () => {
+      POST: handle(async () => {
         const devices = await listDevices(true);
         return json({ ok: true, devices: devices.length });
       }),
@@ -321,19 +445,9 @@ const server = Bun.serve({
 
     "/api/health": { GET: () => json({ ok: true }) },
 
-    // The current user; also answers when access is denied, so the UI can explain why.
-    "/api/me": {
-      GET: async (req, server) => {
-        const rejected = await checkBrowserOrigin(req);
-        const session: Session = rejected ? { identity: null, role: null, reason: rejected } : await authenticate(req, server);
-        // No identity but a role: authentication is bypassed (UI_AUTH).
-        return json({ ...session, capability: CAPABILITY, authDisabled: !!session.role && !session.identity });
-      },
-    },
-
-    // The generated Traefik config, for admins only: it contains basic auth hashes.
-    "/api/traefik/config": { GET: handle("admin", () => json(buildConfig())) },
-    "/api/traefik/status": { GET: handle("viewer", async () => json(await traefikStatus())) },
+    // Polled by Traefik's HTTP provider over the Docker network.
+    "/api/traefik/config": { GET: handle(() => json(buildConfig())) },
+    "/api/traefik/status": { GET: handle(async () => json(await traefikStatus())) },
   },
   development: process.env.NODE_ENV !== "production" && { hmr: true, console: true },
 });

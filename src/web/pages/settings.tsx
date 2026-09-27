@@ -89,8 +89,11 @@ export function SettingsPage({
     }
   };
 
-  // Traefik never connects to proxytail: it watches the config file proxytail writes, mounted read-only.
-  const providerSnippet = `providers:\n  file:\n    directory: "/dynamic"\n    watch: true`;
+  // Traefik polls proxytail over the Docker network (docker-compose.yml), or the host in development.
+  const endpoint = /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
+    ? `${location.origin}/api/traefik/config`.replace(/\/\/(localhost|127\.0\.0\.1)/, "//host.docker.internal")
+    : "http://app:3000/api/traefik/config";
+  const providerSnippet = `providers:\n  http:\n    endpoint: "${endpoint}"\n    pollInterval: "5s"`;
 
   return (
     <div className="max-w-3xl xl:max-w-none">
@@ -148,7 +151,8 @@ export function SettingsPage({
           <CardHeader>
             <CardTitle>Tailscale</CardTitle>
             <CardDescription>
-              Peers are read from the tailscaled sidecar, which lists every peer the tailnet policy lets proxytail reach.
+              Peers are listed through the Tailscale API with a read-only OAuth client (scope{" "}
+              <code className="font-mono">devices:core:read</code>).
             </CardDescription>
             <CardAction>
               {settings.source === "mock" ? (
@@ -167,7 +171,7 @@ export function SettingsPage({
               <Alert>
                 <AlertDescription>
                   <p>
-                    Peers are loaded from <code className="font-mono">TS_MOCK_DEVICES</code> instead of tailscaled.
+                    Peers are loaded from <code className="font-mono">TS_MOCK_DEVICES</code> instead of the Tailscale API.
                   </p>
                 </AlertDescription>
               </Alert>
@@ -176,8 +180,10 @@ export function SettingsPage({
               <Alert>
                 <AlertDescription>
                   <p>
-                    tailscaled's socket isn't available. Share it with proxytail (<code className="font-mono">TS_SOCKET</code>
-                    , see <code className="font-mono">docker-compose.yml</code>).
+                    No OAuth client is configured. Create one with the{" "}
+                    <code className="font-mono">devices:core:read</code> scope and set{" "}
+                    <code className="font-mono">TS_OAUTH_CLIENT_ID</code> and{" "}
+                    <code className="font-mono">TS_OAUTH_CLIENT_SECRET</code>.
                   </p>
                 </AlertDescription>
               </Alert>
@@ -225,8 +231,8 @@ export function SettingsPage({
         <CardHeader>
           <CardTitle>Traefik</CardTitle>
           <CardDescription>
-            Traefik reads its routing table from the file proxytail writes, through the file provider. It runs on its
-            own tailnet node (see <code className="font-mono">docker-compose.yml</code>) to reach 100.x addresses.
+            Traefik pulls its routing table from proxytail through the HTTP provider, and reaches 100.x addresses
+            through the host's Tailscale (see <code className="font-mono">docker-compose.yml</code>).
           </CardDescription>
           <CardAction>
             {traefik?.reachable ? (

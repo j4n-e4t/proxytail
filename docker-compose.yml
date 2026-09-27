@@ -1,13 +1,11 @@
-# Production stack: proxytail and Traefik, each joined to your tailnet through its own Tailscale sidecar.
-#   cp .env.example .env   # set TS_AUTHKEY
+# Production stack for a dedicated proxy host that is already on your tailnet (tailscaled on the host, kernel mode).
+#   cp .env.example .env   # set the OAuth client
 #   docker compose up -d   # pulls ghcr.io/j4n-e4t/proxytail (or `--build` to build locally)
+#   tailscale serve --bg --https=8443 http://127.0.0.1:3000   # publish the UI on the tailnet
 #
-# Two network namespaces, so the internet-facing proxy can't reach the management UI:
-#   - "ui":   tailscale (tag:proxytail) + app. The UI listens on loopback and is published by `tailscale serve`.
-#   - "edge": tailscale-edge (tag:proxytail-edge) + traefik. Public ports 80/443; the tailnet policy decides which
-#             backends this node can reach.
-# The app reads Traefik's API over the internal "control" network. Traefik never connects to the app: it reads its
-# routing table from the traefik-dynamic volume, which it mounts read-only.
+# There is no login: whoever can reach the UI has full access. It's only published on the host's loopback, and
+# `tailscale serve` puts it on the tailnet, where the tailnet policy decides who can reach it.
+# Traefik reaches tailnet peers through the host's routing table, i.e. the host's tailscale0.
 name: proxytail
 
 services:
@@ -15,29 +13,21 @@ services:
     image: ${PROXYTAIL_IMAGE:-ghcr.io/j4n-e4t/proxytail:latest}
     build: .
     restart: unless-stopped
-    # Shares the UI sidecar's network namespace and only listens on loopback: the sidecar's `tailscale serve` publishes
-    # it on the tailnet at https://<TS_HOSTNAME>.<tailnet>.ts.net. Nothing else shares that loopback.
-    network_mode: service:tailscale
-    depends_on:
-      tailscale:
-        condition: service_started
-      volume-init:
-        condition: service_completed_successfully
     environment:
-      HOST: 127.0.0.1
-      # Traefik's API and websecure entrypoint, on tailscale-edge's control network address.
-      TRAEFIK_API_URL: http://172.31.255.3:8080
-      TRAEFIK_TLS_ADDR: 172.31.255.3:443
-      TRAEFIK_CONFIG_FILE: /traefik/proxytail.yaml
-      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+      # All interfaces inside the container; the port is only published on the host's loopback below.
+      HOST: 0.0.0.0
+      TRAEFIK_API_URL: http://traefik:8080
+      TRAEFIK_TLS_ADDR: traefik:443
+      TS_OAUTH_CLIENT_ID: ${TS_OAUTH_CLIENT_ID:-}
+      TS_OAUTH_CLIENT_SECRET: ${TS_OAUTH_CLIENT_SECRET:-}
+      TS_TAILNET: ${TS_TAILNET:-}
       TS_BACKEND_TAG: ${TS_BACKEND_TAG:-}
-      TS_APP_CAPABILITY: ${TS_APP_CAPABILITY:-}
       PUBLIC_ADDRESS: ${PUBLIC_ADDRESS:-}
       UI_HOSTS: ${UI_HOSTS:-}
+    ports:
+      - "127.0.0.1:${UI_PORT:-3000}:3000"
     volumes:
       - proxytail-data:/data
-      - traefik-dynamic:/traefik
-      - tailscale-socket:/var/run/tailscale
     read_only: true
     tmpfs:
       - /tmp
@@ -45,106 +35,25 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-
-  tailscale:
-    image: tailscale/tailscale:latest
-    hostname: ${TS_HOSTNAME:-proxytail}
-    restart: unless-stopped
-    environment:
-      # Only needed for the first start; the node identity is kept in the tailscale-state volume.
-      TS_AUTHKEY: ${TS_AUTHKEY:-}
-      TS_STATE_DIR: /var/lib/tailscale
-      # LocalAPI socket, shared with proxytail. Also the tailscale CLI's default path.
-      TS_SOCKET: /var/run/tailscale/tailscaled.sock
-      # Serves proxytail's UI on the tailnet with a *.ts.net certificate (needs HTTPS enabled for the tailnet).
-      TS_SERVE_CONFIG: /config/serve.json
-      TS_USERSPACE: "false"
-      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
-    volumes:
-      - tailscale-state:/var/lib/tailscale
-      - tailscale-socket:/var/run/tailscale
-    configs:
-      - source: tailscale-serve
-        target: /config/serve.json
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    # No published ports: the UI is only reachable through `tailscale serve`.
-    networks:
-      ui: {}
-      control:
-        ipv4_address: 172.31.255.2
-
-  tailscale-edge:
-    image: tailscale/tailscale:latest
-    hostname: ${TS_EDGE_HOSTNAME:-proxytail-edge}
-    restart: unless-stopped
-    environment:
-      # A separate node, so the tailnet policy can limit what the internet-facing proxy reaches. The key must be
-      # allowed to apply the tag (see README). Only needed for the first start.
-      TS_AUTHKEY: ${TS_EDGE_AUTHKEY:-${TS_AUTHKEY:-}}
-      TS_STATE_DIR: /var/lib/tailscale
-      TS_USERSPACE: "false"
-      TS_EXTRA_ARGS: ${TS_EDGE_EXTRA_ARGS:---advertise-tags=tag:proxytail-edge}
-      # Its LocalAPI socket stays in this container: never share it with Traefik.
-    volumes:
-      - tailscale-edge-state:/var/lib/tailscale
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    # Lets the unprivileged Traefik bind 80 and 443 in this network namespace.
-    sysctls:
-      net.ipv4.ip_unprivileged_port_start: 0
-    # Traefik shares this container's network namespace, so its public ports are published here.
-    ports:
-      - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
-    networks:
-      edge: {}
-      control:
-        ipv4_address: 172.31.255.3
-
-  # Hands the volumes to the unprivileged user proxytail and Traefik both run as (65532), whoever created them: ACME
-  # volumes from a root Traefik, or a traefik-dynamic volume first mounted by an image without /traefik.
-  volume-init:
-    image: busybox:1.37
-    network_mode: none
-    restart: "no"
-    command:
-      - sh
-      - -c
-      - chown -R 65532:65532 /letsencrypt /dynamic && chmod 700 /letsencrypt && chmod 750 /dynamic
-    volumes:
-      - traefik-acme:/letsencrypt
-      - traefik-dynamic:/dynamic
 
   traefik:
     image: traefik:v3.5
     restart: unless-stopped
-    network_mode: service:tailscale-edge
-    user: "65532:65532"
-    read_only: true
-    tmpfs:
-      - /tmp
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    volumes:
-      - traefik-acme:/letsencrypt
-      - traefik-dynamic:/dynamic:ro
     depends_on:
-      tailscale-edge:
-        condition: service_started
-      volume-init:
-        condition: service_completed_successfully
-      # The app writes the initial config on startup.
       app:
         condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - traefik-acme:/letsencrypt
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
     command:
       - --entrypoints.web.address=:80
       # All HTTP traffic is redirected to HTTPS (ACME HTTP-01 challenges on :80 are still answered first).
@@ -159,44 +68,14 @@ services:
       - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
       - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-}
       - --certificatesresolvers.letsencrypt.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}
-      # Unauthenticated API: proxytail reads router status from it. Bound to the control network address only, so
-      # it's reachable neither from the internet nor over this node's tailnet interface.
+      # Unauthenticated API on :8080, only reachable on the Docker network (not published): proxytail reads router
+      # status from it.
       - --api.insecure=true
-      - --entrypoints.traefik.address=172.31.255.3:8080
-      # Routing table written by proxytail.
-      - --providers.file.directory=/dynamic
-      - --providers.file.watch=true
+      - --providers.http.endpoint=http://app:3000/api/traefik/config
+      - --providers.http.pollInterval=5s
       - --log.level=INFO
       - --accesslog=true
 
-networks:
-  # Internet egress for the UI sidecar (tailscaled's control plane and DERP).
-  ui: {}
-  # Public ingress and internet egress (ACME) for Traefik.
-  edge: {}
-  # app → Traefik API and TLS probe. No internet access; only the two sidecars are attached. Change the subnet (and
-  # the addresses above) if it collides with one of your networks.
-  control:
-    internal: true
-    ipam:
-      config:
-        - subnet: 172.31.255.0/29
-
 volumes:
   proxytail-data:
-  tailscale-state:
-  tailscale-edge-state:
-  tailscale-socket:
   traefik-acme:
-  traefik-dynamic:
-
-configs:
-  # Tailnet HTTPS on 443 → proxytail. `$$` escapes compose interpolation: containerboot fills in the node's ts.net name.
-  tailscale-serve:
-    content: |
-      {
-        "TCP": { "443": { "HTTPS": true } },
-        "Web": {
-          "$${TS_CERT_DOMAIN}:443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:3000" } } }
-        }
-      }

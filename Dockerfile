@@ -15,19 +15,16 @@ RUN case "$TARGETARCH" in \
       *) echo "unsupported arch: $TARGETARCH" >&2; exit 1 ;; \
     esac \
  && OUTFILE=/out/proxytail bun run build.ts "$target" \
- && mkdir -p /out/data /out/traefik
+ && mkdir -p /out/data
 
 # Distroless: glibc + CA certificates, no shell. The compiled binary embeds the Bun runtime and the frontend.
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /out/proxytail /proxytail
 COPY --from=build --chown=nonroot:nonroot /out/data /data
-# Traefik's dynamic config, shared with Traefik through a volume (a new named volume inherits this ownership).
-COPY --from=build --chown=nonroot:nonroot /out/traefik /traefik
 
 ENV NODE_ENV=production \
     PORT=3000 \
-    DATA_DIR=/data \
-    TRAEFIK_CONFIG_FILE=/traefik/proxytail.yaml
+    DATA_DIR=/data
 VOLUME /data
 EXPOSE 3000
 

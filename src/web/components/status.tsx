@@ -205,14 +205,19 @@ export function CertCell({ host, traefik }: { host: ProxyHost; traefik: TraefikS
 }
 
 export function AccessCell({ host }: { host: ProxyHost }) {
-  if (!host.basicAuth) return <Cell label="Public" t="muted" />;
   const names = host.basicAuthUsers.map((u) => u.username);
-  return (
-    <Cell
-      icon={KeyRound}
-      label="Basic auth"
-      sub={`${names.length} ${names.length === 1 ? "user" : "users"}`}
-      tip={names.join(", ")}
-    />
-  );
+  const users = `${names.length} ${names.length === 1 ? "user" : "users"}`;
+  if (host.clientAuth !== "off") {
+    const cas = `${host.clientCaIds.length} ${host.clientCaIds.length === 1 ? "CA" : "CAs"}`;
+    return (
+      <Cell
+        icon={ShieldCheck}
+        label="Client cert"
+        sub={[host.clientAuth === "require" ? "Required" : "Optional", host.basicAuth && "basic auth"].filter(Boolean).join(" + ")}
+        tip={`Verified against ${cas}${host.basicAuth ? `; basic auth for ${names.join(", ")}` : ""}`}
+      />
+    );
+  }
+  if (!host.basicAuth) return <Cell label="Public" t="muted" />;
+  return <Cell icon={KeyRound} label="Basic auth" sub={users} tip={names.join(", ")} />;
 }

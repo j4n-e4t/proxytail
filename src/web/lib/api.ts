@@ -1,3 +1,5 @@
+export type ClientAuth = "off" | "require" | "optional";
+
 export interface ProxyHost {
   id: number;
   domains: string[];
@@ -12,6 +14,9 @@ export interface ProxyHost {
   basicAuthUsers: { username: string }[];
   healthCheck: boolean;
   healthCheckPath: string;
+  clientAuth: ClientAuth;
+  clientCaIds: number[];
+  clientCertHeaders: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -27,10 +32,54 @@ export type ProxyHostDraft = Pick<
   | "basicAuth"
   | "healthCheck"
   | "healthCheckPath"
+  | "clientAuth"
+  | "clientCaIds"
+  | "clientCertHeaders"
 > & {
   /** Omit `password` to keep the stored one; `previous` is the username before a rename. */
   basicAuthUsers: { username: string; password?: string; previous?: string }[];
 };
+
+export interface CertSummary {
+  subject: string;
+  issuer: string;
+  serial: string;
+  notBefore: string;
+  notAfter: string;
+  fingerprint: string;
+}
+
+export interface ClientCert {
+  id: number;
+  caId: number;
+  summary: CertSummary;
+  createdAt: string;
+}
+
+export interface ClientCa {
+  id: number;
+  name: string;
+  certPem: string;
+  summary: CertSummary;
+  certCount: number;
+  createdAt: string;
+  /** Generated here, so it holds a key and can issue client certificates. */
+  generated: boolean;
+  /** Services that verify client certificates against this CA. */
+  hostIds: number[];
+  clientCerts: ClientCert[];
+}
+
+export type NewClientCa = { name: string } & ({ mode: "generate"; days: number } | { mode: "import"; pem: string });
+
+export interface IssuedCert {
+  cert: ClientCert;
+  fileName: string;
+  /** Base64 PKCS#12 bundle (key, certificate, CA). */
+  p12: string;
+  certPem: string;
+  keyPem: string;
+}
 
 export interface Device {
   id: string;
@@ -66,21 +115,11 @@ export interface Domain {
   hostCount: number;
 }
 
-export interface Me {
-  identity: { login: string; name: string; profilePicUrl: string | null; device: string } | null;
-  role: "admin" | "viewer" | null;
-  /** Why access was denied. */
-  reason?: string;
-  /** App capability name roles are granted under in the tailnet policy. */
-  capability: string;
-  authDisabled: boolean;
-}
-
 export interface Settings {
   publicAddress: string;
   configured: boolean;
-  /** Where peers are listed from: the local tailscaled or a mock file. */
-  source: "local" | "mock" | null;
+  /** Where peers are listed from: the Tailscale API or a mock file. */
+  source: "api" | "mock" | null;
   mock: boolean;
   /** Only peers with this ACL tag are listed and can be targeted. */
   backendTag: string;
@@ -118,7 +157,6 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
-  me: () => request<Me>("GET", "/api/me"),
   hosts: () => request<ProxyHost[]>("GET", "/api/hosts"),
   createHost: (h: ProxyHostDraft) => request<ProxyHost>("POST", "/api/hosts", h),
   updateHost: (id: number, h: Partial<ProxyHostDraft>) => request<ProxyHost>("PUT", `/api/hosts/${id}`, h),
@@ -128,6 +166,13 @@ export const api = {
   addDomain: (name: string) => request<Domain>("POST", "/api/domains", { name }),
   verifyDomain: (id: number) => request<Domain>("POST", `/api/domains/${id}/verify`),
   deleteDomain: (id: number) => request<void>("DELETE", `/api/domains/${id}`),
+  clientCas: () => request<ClientCa[]>("GET", "/api/client-cas"),
+  createClientCa: (ca: NewClientCa) => request<ClientCa>("POST", "/api/client-cas", ca),
+  renameClientCa: (id: number, name: string) => request<ClientCa>("PATCH", `/api/client-cas/${id}`, { name }),
+  deleteClientCa: (id: number) => request<void>("DELETE", `/api/client-cas/${id}`),
+  issueClientCert: (caId: number, c: { commonName: string; days: number; password: string }) =>
+    request<IssuedCert>("POST", `/api/client-cas/${caId}/certs`, c),
+  deleteClientCert: (id: number) => request<void>("DELETE", `/api/client-certs/${id}`),
   detectIp: () => request<{ ip: string }>("POST", "/api/settings/detect-ip"),
   settings: () => request<Settings>("GET", "/api/settings"),
   saveSettings: (s: Record<string, string | null>) => request<Settings>("PUT", "/api/settings", s),

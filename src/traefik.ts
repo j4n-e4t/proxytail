@@ -1,18 +1,18 @@
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
 import { certificateFor, type CertInfo } from "./certs";
-import { dataDir, hosts, type ProxyHost } from "./db";
+import { clientCas, hosts, type ProxyHost } from "./db";
 
 // Every service is served over HTTPS with a Let's Encrypt certificate; plain HTTP is redirected by Traefik.
 const ENTRYPOINTS = ["websecure"];
 const CERT_RESOLVER = "letsencrypt";
 const TRAEFIK_API_URL = process.env.TRAEFIK_API_URL ?? "http://localhost:8080";
-/** Read by Traefik's file provider, which watches the directory. JSON is valid YAML; the provider only reads .yaml/.toml. */
-export const TRAEFIK_CONFIG_FILE = process.env.TRAEFIK_CONFIG_FILE || join(dataDir, "traefik", "proxytail.yaml");
 export const HEALTH_CHECK_INTERVAL = "10s";
 const HEALTH_CHECK_TIMEOUT = "5s";
 
 export const routerName = (h: Pick<ProxyHost, "id">) => `proxytail-host-${h.id}`;
+
+/** Header the verified client certificate's details are forwarded in (URL-encoded, see Traefik's passTLSClientCert). */
+export const CLIENT_CERT_INFO_HEADER = "X-Forwarded-Tls-Client-Cert-Info";
+const DN_FIELDS = { commonName: true, organization: true, serialNumber: true };
 
 /** Dynamic configuration served to Traefik's HTTP provider. */
 export function buildConfig() {
@@ -20,16 +20,41 @@ export function buildConfig() {
   const services: Record<string, unknown> = {};
   const serversTransports: Record<string, unknown> = {};
   const middlewares: Record<string, unknown> = {};
+  const tlsOptions: Record<string, unknown> = {};
+  const cas = new Map(clientCas.list().map((ca) => [ca.id, ca]));
 
   for (const h of hosts.list()) {
     if (!h.enabled) continue;
     const name = routerName(h);
+    const tls: Record<string, unknown> = { certResolver: CERT_RESOLVER };
     const router: Record<string, unknown> = {
       rule: h.domains.map((d) => `Host(\`${d}\`)`).join(" || "),
       entryPoints: ENTRYPOINTS,
       service: name,
-      tls: { certResolver: CERT_RESOLVER },
+      tls,
     };
+    const chain: string[] = [];
+    const caPems = h.clientCaIds.map((id) => cas.get(id)?.certPem).filter((p): p is string => !!p);
+    if (h.clientAuth !== "off" && caPems.length) {
+      // TLS options apply per SNI hostname, so each service gets its own. caFiles takes PEM content as well as paths.
+      tlsOptions[name] = {
+        clientAuth: {
+          caFiles: caPems,
+          clientAuthType: h.clientAuth === "require" ? "RequireAndVerifyClientCert" : "VerifyClientCertIfGiven",
+        },
+      };
+      tls.options = name;
+      if (h.clientCertHeaders) {
+        // Drop whatever the client sent in the header first, so the service can trust it.
+        middlewares[`${name}-client-cert-strip`] = { headers: { customRequestHeaders: { [CLIENT_CERT_INFO_HEADER]: "" } } };
+        middlewares[`${name}-client-cert`] = {
+          passTLSClientCert: {
+            info: { notAfter: true, notBefore: true, serialNumber: true, subject: DN_FIELDS, issuer: DN_FIELDS },
+          },
+        };
+        chain.push(`${name}-client-cert-strip`, `${name}-client-cert`);
+      }
+    }
     if (h.basicAuth && h.basicAuthUsers.length) {
       middlewares[`${name}-auth`] = {
         basicAuth: {
@@ -39,8 +64,9 @@ export function buildConfig() {
           removeHeader: true,
         },
       };
-      router.middlewares = [`${name}-auth`];
+      chain.push(`${name}-auth`);
     }
+    if (chain.length) router.middlewares = chain;
     routers[name] = router;
     const loadBalancer: Record<string, unknown> = {
       servers: [{ url: `${h.scheme}://${h.targetIp}:${h.targetPort}` }],
@@ -67,29 +93,7 @@ export function buildConfig() {
   const http: Record<string, unknown> = { routers, services };
   if (Object.keys(serversTransports).length) http.serversTransports = serversTransports;
   if (Object.keys(middlewares).length) http.middlewares = middlewares;
-  return { http };
-}
-
-let written: string | null = null;
-
-/**
- * Writes the dynamic configuration for Traefik's file provider, skipping unchanged content. Traefik never connects to
- * proxytail: it only reads this file. The rename is atomic, so Traefik never sees a partial file, and the temporary
- * name has no .yaml extension, so the provider ignores it. The file holds basic auth hashes, hence 0640.
- */
-export function writeConfig() {
-  const content = JSON.stringify(buildConfig(), null, 2) + "\n";
-  if (content === written) return;
-  try {
-    mkdirSync(dirname(TRAEFIK_CONFIG_FILE), { recursive: true });
-    const tmp = join(dirname(TRAEFIK_CONFIG_FILE), `.${basename(TRAEFIK_CONFIG_FILE)}.tmp`);
-    writeFileSync(tmp, content, { mode: 0o640 });
-    renameSync(tmp, TRAEFIK_CONFIG_FILE);
-    written = content;
-  } catch (e) {
-    // Retried on the next change or reconcile tick.
-    console.error(`Writing Traefik config to ${TRAEFIK_CONFIG_FILE} failed:`, e);
-  }
+  return Object.keys(tlsOptions).length ? { http, tls: { options: tlsOptions } } : { http };
 }
 
 export interface TraefikStatus {

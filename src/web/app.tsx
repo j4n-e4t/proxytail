@@ -7,22 +7,23 @@ import {
   Moon,
   RefreshCw,
   Settings as SettingsIcon,
-  ShieldAlert,
+  ShieldCheck,
   Sun,
   Waypoints,
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { TailscaleIcon, TraefikIcon } from "@/components/brand-icons";
 import { StatusDot } from "@/components/status";
 import { usePoll } from "@/hooks/use-poll";
-import { api, type Me } from "@/lib/api";
+import { api } from "@/lib/api";
 import { useTheme, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
+import { ClientCasPage } from "@/pages/client-cas";
 import { PeersPage } from "@/pages/peers";
 import { ServiceEditorPage } from "@/pages/service-editor";
 import { DomainsPage } from "@/pages/domains";
@@ -30,8 +31,8 @@ import { HostsPage } from "@/pages/hosts";
 import { SettingsPage } from "@/pages/settings";
 import "./globals.css";
 
-type Page = "services" | "domains" | "peers" | "settings";
-const PAGES: Page[] = ["services", "domains", "peers", "settings"];
+type Page = "services" | "domains" | "client-cas" | "peers" | "settings";
+const PAGES: Page[] = ["services", "domains", "client-cas", "peers", "settings"];
 
 interface Route {
   page: Page;
@@ -123,73 +124,15 @@ function Brand() {
   );
 }
 
-function Avatar({ me }: { me: Me }) {
-  const id = me.identity!;
-  return id.profilePicUrl ? (
-    <img src={id.profilePicUrl} alt="" className="size-7 shrink-0 rounded-full border" referrerPolicy="no-referrer" />
-  ) : (
-    <div className="flex size-7 shrink-0 items-center justify-center rounded-full border bg-background text-xs font-medium uppercase">
-      {id.name.slice(0, 1)}
-    </div>
-  );
-}
-
-function CurrentUser({ me }: { me: Me }) {
-  if (me.authDisabled)
-    return (
-      <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-warning" title="UI_AUTH">
-        <ShieldAlert className="size-3.5" /> Authentication bypassed
-      </div>
-    );
-  if (!me.identity) return null;
-  return (
-    <div className="flex items-center gap-2.5 px-3 py-1.5" title={`${me.identity.login} on ${me.identity.device}`}>
-      <Avatar me={me} />
-      <div className="min-w-0 leading-tight">
-        <p className="truncate text-xs font-medium">{me.identity.name}</p>
-        <p className="truncate text-xs text-muted-foreground">{me.role === "admin" ? "Admin" : "Read-only"}</p>
-      </div>
-    </div>
-  );
-}
-
-/** Shown when the caller has no role: explains the grant that gives them one. */
-function AccessDenied({ me, onRetry }: { me: Me; onRetry: () => void }) {
-  const grant = JSON.stringify(
-    {
-      grants: [
-        {
-          src: [me.identity && !me.identity.login.includes("tag:") ? me.identity.login : "group:admins"],
-          dst: ["tag:proxytail"],
-          app: { [me.capability]: [{ role: "admin" }] },
-        },
-      ],
-    },
-    null,
-    2,
-  );
+/** Shown when the UI can't load its data, e.g. when opened under a hostname that isn't allowed. */
+function LoadError({ error, onRetry }: { error: string; onRetry: () => void }) {
   return (
     <div className="flex min-h-screen items-center justify-center p-6">
       <Card className="w-full max-w-xl">
         <CardHeader>
-          <CardTitle>No access to proxytail</CardTitle>
-          <CardDescription>
-            {me.identity ? (
-              <>
-                Signed in as <span className="font-medium text-foreground">{me.identity.login}</span> on{" "}
-                {me.identity.device}.{" "}
-              </>
-            ) : null}
-            {me.reason}
-          </CardDescription>
+          <CardTitle>Can't open proxytail</CardTitle>
+          <CardDescription>{error}</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-3 text-sm">
-          <p className="text-muted-foreground">
-            Access is granted in your tailnet policy file. Add a grant like this, with <code>dst</code> set to the
-            proxytail node's tag, and use <code>"viewer"</code> for read-only access:
-          </p>
-          <pre className="overflow-x-auto rounded-lg border bg-muted/40 p-4 font-mono text-xs leading-relaxed">{grant}</pre>
-        </CardContent>
         <CardFooter className="justify-end border-t">
           <Button variant="outline" onClick={onRetry}>
             <RefreshCw /> Retry
@@ -201,18 +144,12 @@ function AccessDenied({ me, onRetry }: { me: Me; onRetry: () => void }) {
 }
 
 function App() {
-  const me = usePoll(api.me, 0);
-  if (!me.data) {
-    if (!me.error) return null;
-    return (
-      <AccessDenied me={{ identity: null, role: null, reason: me.error, capability: "", authDisabled: false }} onRetry={me.reload} />
-    );
-  }
-  if (!me.data.role) return <AccessDenied me={me.data} onRetry={me.reload} />;
-  return <Console me={me.data} />;
+  const settings = usePoll(api.settings, 0);
+  if (!settings.data) return settings.error ? <LoadError error={settings.error} onRetry={settings.reload} /> : null;
+  return <Console />;
 }
 
-function Console({ me }: { me: Me }) {
+function Console() {
   const [route, navigate] = useRoute();
   const { page } = route;
   const setPage = (p: Page) => navigate(p);
@@ -220,6 +157,7 @@ function Console({ me }: { me: Me }) {
   const hosts = usePoll(api.hosts, 0);
   const settings = usePoll(api.settings, 0);
   const domains = usePoll(api.domains, 0);
+  const clientCas = usePoll(api.clientCas, 0);
   const traefik = usePoll(api.traefik, 5000);
   const devices = usePoll(
     useCallback(() => api.devices(), []),
@@ -229,6 +167,7 @@ function Console({ me }: { me: Me }) {
   const refreshHosts = () => {
     hosts.reload();
     domains.reload();
+    clientCas.reload();
     traefik.reload();
   };
 
@@ -279,6 +218,13 @@ function Console({ me }: { me: Me }) {
             onClick={() => setPage("domains")}
           />
           <NavItem
+            icon={ShieldCheck}
+            label="Client CAs"
+            count={clientCas.data?.length}
+            active={page === "client-cas"}
+            onClick={() => setPage("client-cas")}
+          />
+          <NavItem
             icon={MonitorSmartphone}
             label="Peers"
             count={devices.data?.length}
@@ -294,7 +240,6 @@ function Console({ me }: { me: Me }) {
         </nav>
 
         <div className="space-y-1 border-t p-3">
-          <CurrentUser me={me} />
           <div className="flex items-center justify-between px-3 pt-2">
             <span className="text-xs text-muted-foreground">Theme</span>
             <ToggleGroup
@@ -342,8 +287,10 @@ function Console({ me }: { me: Me }) {
               devices={devices.data ?? []}
               peerTag={settings.data?.backendTag ?? ""}
               domains={domains.data}
+              clientCas={clientCas.data}
               traefik={traefik.data}
               onOpenDomains={() => setPage("domains")}
+              onOpenClientCas={() => setPage("client-cas")}
               onCancel={() => setPage("services")}
               onSaved={() => {
                 refreshHosts();
@@ -360,6 +307,14 @@ function Console({ me }: { me: Me }) {
                 hosts.reload();
               }}
               onOpenSettings={() => setPage("settings")}
+            />
+          )}
+          {page === "client-cas" && (
+            <ClientCasPage
+              cas={clientCas.data}
+              hosts={hosts.data ?? []}
+              onChanged={clientCas.reload}
+              onOpenService={(id) => navigate(`services/${id}`)}
             />
           )}
           {page === "peers" && (

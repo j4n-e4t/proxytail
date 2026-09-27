@@ -1,5 +1,5 @@
 import { Fragment, useState, type FormEvent } from "react";
-import { Check, Copy, Globe, Loader2, MoreHorizontal, Plus, RefreshCw, Trash2, TriangleAlert } from "lucide-react";
+import { Check, Globe, Loader2, MoreHorizontal, Plus, RefreshCw, Trash2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
@@ -33,30 +33,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { CopyButton } from "@/components/copy-button";
 import { PageHeader } from "@/components/page-header";
 import { ToneBadge } from "@/components/status";
 import { api, type Domain } from "@/lib/api";
 import { cn, timeAgo } from "@/lib/utils";
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <Button
-      type="button"
-      variant="ghost"
-      size="icon-xs"
-      aria-label="Copy"
-      onClick={() =>
-        navigator.clipboard.writeText(text).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1200);
-        })
-      }
-    >
-      {copied ? <Check /> : <Copy />}
-    </Button>
-  );
-}
 
 /** The DNS record to create, laid out like a DNS provider's record form. */
 function RecordTable({ record }: { record: NonNullable<Domain["record"]> }) {

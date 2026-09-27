@@ -35,9 +35,7 @@ jobs:
           for _ in $(seq 1 20); do ./dist/proxytail healthcheck && break; sleep 0.5; done
           ./dist/proxytail healthcheck
           curl -fsS http://127.0.0.1:3000/ | grep -q '<div id="root">'
-          # Traefik's config is written to a file, and the endpoint is admin-only.
-          grep -q '{}' "$RUNNER_TEMP/data/traefik/proxytail.yaml"
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/traefik/config)" = 403
+          curl -fsS http://127.0.0.1:3000/api/traefik/config
 
   image:
     name: Docker image

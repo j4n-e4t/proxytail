@@ -1,8 +1,9 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import type { CertSummary } from "./pki";
 
-export const dataDir = process.env.DATA_DIR ?? join(import.meta.dir, "..", "data");
+const dataDir = process.env.DATA_DIR ?? join(import.meta.dir, "..", "data");
 mkdirSync(dataDir, { recursive: true });
 
 export const db = new Database(join(dataDir, "proxytail.db"), { create: true, strict: true });
@@ -35,6 +36,11 @@ if (!hostColumns.includes("health_check")) {
   db.run("ALTER TABLE proxy_hosts ADD COLUMN health_check INTEGER NOT NULL DEFAULT 0");
   db.run("ALTER TABLE proxy_hosts ADD COLUMN health_check_path TEXT NOT NULL DEFAULT '/'");
 }
+if (!hostColumns.includes("client_auth")) {
+  db.run("ALTER TABLE proxy_hosts ADD COLUMN client_auth TEXT NOT NULL DEFAULT 'off'");
+  db.run("ALTER TABLE proxy_hosts ADD COLUMN client_ca_ids TEXT NOT NULL DEFAULT '[]'");
+  db.run("ALTER TABLE proxy_hosts ADD COLUMN client_cert_headers INTEGER NOT NULL DEFAULT 0");
+}
 
 db.run(`
   CREATE TABLE IF NOT EXISTS settings (
@@ -58,7 +64,34 @@ db.run(`
   )
 `);
 
+db.run(`
+  CREATE TABLE IF NOT EXISTS client_cas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    cert_pem TEXT NOT NULL,
+    key_pem TEXT,
+    summary TEXT NOT NULL,
+    cert_count INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS client_certs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ca_id INTEGER NOT NULL REFERENCES client_cas(id) ON DELETE CASCADE,
+    summary TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
 export type Scheme = "http" | "https";
+
+/**
+ * Client certificate (mTLS) policy of a service. `require` rejects the TLS handshake without a certificate from one of
+ * the service's CAs; `optional` verifies a certificate if the client sends one, and lets the service decide.
+ */
+export type ClientAuth = "off" | "require" | "optional";
 
 /** A basic auth credential; `hash` is an htpasswd-compatible bcrypt hash. */
 export interface BasicAuthUser {
@@ -81,6 +114,10 @@ export interface ProxyHost {
   /** Traefik probes the backend and marks it down when the check fails. */
   healthCheck: boolean;
   healthCheckPath: string;
+  clientAuth: ClientAuth;
+  clientCaIds: number[];
+  /** Forward the verified client certificate's details to the service in X-Forwarded-Tls-Client-Cert-Info. */
+  clientCertHeaders: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -101,6 +138,9 @@ interface ProxyHostRow {
   basic_auth_users: string;
   health_check: number;
   health_check_path: string;
+  client_auth: ClientAuth;
+  client_ca_ids: string;
+  client_cert_headers: number;
   created_at: string;
   updated_at: string;
 }
@@ -120,6 +160,9 @@ function toHost(r: ProxyHostRow): ProxyHost {
     basicAuthUsers: JSON.parse(r.basic_auth_users),
     healthCheck: !!r.health_check,
     healthCheckPath: r.health_check_path,
+    clientAuth: r.client_auth,
+    clientCaIds: JSON.parse(r.client_ca_ids),
+    clientCertHeaders: !!r.client_cert_headers,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -139,6 +182,9 @@ function toParams(h: ProxyHostInput) {
     basic_auth_users: JSON.stringify(h.basicAuthUsers),
     health_check: h.healthCheck ? 1 : 0,
     health_check_path: h.healthCheckPath,
+    client_auth: h.clientAuth,
+    client_ca_ids: JSON.stringify(h.clientCaIds),
+    client_cert_headers: h.clientCertHeaders ? 1 : 0,
   };
 }
 
@@ -154,9 +200,10 @@ export const hosts = {
     const row = db
       .query<ProxyHostRow, any>(
         `INSERT INTO proxy_hosts (domains, device_id, device_name, target_ip, target_port, scheme, insecure_skip_verify, enabled,
-           basic_auth, basic_auth_users, health_check, health_check_path)
+           basic_auth, basic_auth_users, health_check, health_check_path, client_auth, client_ca_ids, client_cert_headers)
          VALUES ($domains, $device_id, $device_name, $target_ip, $target_port, $scheme, $insecure_skip_verify, $enabled,
-           $basic_auth, $basic_auth_users, $health_check, $health_check_path)
+           $basic_auth, $basic_auth_users, $health_check, $health_check_path, $client_auth, $client_ca_ids,
+           $client_cert_headers)
          RETURNING *`,
       )
       .get(toParams(h))!;
@@ -169,6 +216,7 @@ export const hosts = {
            target_ip = $target_ip, target_port = $target_port, scheme = $scheme,
            insecure_skip_verify = $insecure_skip_verify, enabled = $enabled, basic_auth = $basic_auth,
            basic_auth_users = $basic_auth_users, health_check = $health_check, health_check_path = $health_check_path,
+           client_auth = $client_auth, client_ca_ids = $client_ca_ids, client_cert_headers = $client_cert_headers,
            updated_at = datetime('now')
          WHERE id = $id RETURNING *`,
       )
@@ -253,6 +301,109 @@ export const domains = {
     return list
       .filter((d) => hostname === d.name || hostname.endsWith(`.${d.name}`))
       .sort((a, b) => b.name.length - a.name.length)[0];
+  },
+};
+
+export interface ClientCa {
+  id: number;
+  name: string;
+  certPem: string;
+  /** Only set for CAs generated here, which can issue client certificates. Never leaves the server. */
+  keyPem: string | null;
+  summary: CertSummary;
+  /** Certificates in the bundle; imported bundles may include intermediates. */
+  certCount: number;
+  createdAt: string;
+}
+
+interface ClientCaRow {
+  id: number;
+  name: string;
+  cert_pem: string;
+  key_pem: string | null;
+  summary: string;
+  cert_count: number;
+  created_at: string;
+}
+
+const toCa = (r: ClientCaRow): ClientCa => ({
+  id: r.id,
+  name: r.name,
+  certPem: r.cert_pem,
+  keyPem: r.key_pem,
+  summary: JSON.parse(r.summary),
+  certCount: r.cert_count,
+  createdAt: r.created_at,
+});
+
+export const clientCas = {
+  list(): ClientCa[] {
+    return db.query<ClientCaRow, []>("SELECT * FROM client_cas ORDER BY name, id").all().map(toCa);
+  },
+  get(id: number): ClientCa | null {
+    const row = db.query<ClientCaRow, [number]>("SELECT * FROM client_cas WHERE id = ?").get(id);
+    return row ? toCa(row) : null;
+  },
+  create(ca: Omit<ClientCa, "id" | "createdAt">): ClientCa {
+    return toCa(
+      db
+        .query<ClientCaRow, any>(
+          `INSERT INTO client_cas (name, cert_pem, key_pem, summary, cert_count)
+           VALUES ($name, $cert_pem, $key_pem, $summary, $cert_count) RETURNING *`,
+        )
+        .get({
+          name: ca.name,
+          cert_pem: ca.certPem,
+          key_pem: ca.keyPem,
+          summary: JSON.stringify(ca.summary),
+          cert_count: ca.certCount,
+        })!,
+    );
+  },
+  rename(id: number, name: string): ClientCa | null {
+    const row = db.query<ClientCaRow, [string, number]>("UPDATE client_cas SET name = ? WHERE id = ? RETURNING *").get(name, id);
+    return row ? toCa(row) : null;
+  },
+  delete(id: number): boolean {
+    return db.query("DELETE FROM client_cas WHERE id = ?").run(id).changes > 0;
+  },
+};
+
+/** A client certificate issued by a generated CA. Only its public details are kept, not its key. */
+export interface ClientCert {
+  id: number;
+  caId: number;
+  summary: CertSummary;
+  createdAt: string;
+}
+
+interface ClientCertRow {
+  id: number;
+  ca_id: number;
+  summary: string;
+  created_at: string;
+}
+
+const toClientCert = (r: ClientCertRow): ClientCert => ({
+  id: r.id,
+  caId: r.ca_id,
+  summary: JSON.parse(r.summary),
+  createdAt: r.created_at,
+});
+
+export const clientCerts = {
+  list(): ClientCert[] {
+    return db.query<ClientCertRow, []>("SELECT * FROM client_certs ORDER BY id DESC").all().map(toClientCert);
+  },
+  create(caId: number, summary: CertSummary): ClientCert {
+    return toClientCert(
+      db
+        .query<ClientCertRow, [number, string]>("INSERT INTO client_certs (ca_id, summary) VALUES (?, ?) RETURNING *")
+        .get(caId, JSON.stringify(summary))!,
+    );
+  },
+  delete(id: number): boolean {
+    return db.query("DELETE FROM client_certs WHERE id = ?").run(id).changes > 0;
   },
 };
 
