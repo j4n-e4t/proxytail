@@ -33,10 +33,10 @@ if (!hostColumns.includes("basic_auth")) {
   db.run("ALTER TABLE proxy_hosts ADD COLUMN basic_auth INTEGER NOT NULL DEFAULT 0");
   db.run("ALTER TABLE proxy_hosts ADD COLUMN basic_auth_users TEXT NOT NULL DEFAULT '[]'");
 }
-// Off for services created before health checks existed, so a failing check can't take a working route offline.
-if (!hostColumns.includes("health_check")) {
-  db.run("ALTER TABLE proxy_hosts ADD COLUMN health_check INTEGER NOT NULL DEFAULT 0");
-  db.run("ALTER TABLE proxy_hosts ADD COLUMN health_check_path TEXT NOT NULL DEFAULT '/'");
+// Backend health checks were removed.
+if (hostColumns.includes("health_check")) {
+  db.run("ALTER TABLE proxy_hosts DROP COLUMN health_check");
+  db.run("ALTER TABLE proxy_hosts DROP COLUMN health_check_path");
 }
 
 db.run(`
@@ -108,9 +108,6 @@ export interface ProxyHost {
   enabled: boolean;
   basicAuth: boolean;
   basicAuthUsers: BasicAuthUser[];
-  /** Traefik probes the backend and marks it down when the check fails. */
-  healthCheck: boolean;
-  healthCheckPath: string;
   clientAuth: ClientAuth;
   clientCaIds: number[];
   /** Forward the verified client certificate's details to the service in X-Forwarded-Tls-Client-Cert-Info. */
@@ -133,8 +130,6 @@ interface ProxyHostRow {
   enabled: number;
   basic_auth: number;
   basic_auth_users: string;
-  health_check: number;
-  health_check_path: string;
   client_auth: ClientAuth;
   client_cert_headers: number;
   created_at: string;
@@ -167,8 +162,6 @@ function toHost(r: ProxyHostRow, links = caLinks(r.id)): ProxyHost {
     enabled: !!r.enabled,
     basicAuth: !!r.basic_auth,
     basicAuthUsers: JSON.parse(r.basic_auth_users),
-    healthCheck: !!r.health_check,
-    healthCheckPath: r.health_check_path,
     clientAuth: r.client_auth,
     clientCaIds: links.get(r.id) ?? [],
     clientCertHeaders: !!r.client_cert_headers,
@@ -189,8 +182,6 @@ function toParams(h: ProxyHostInput) {
     enabled: h.enabled ? 1 : 0,
     basic_auth: h.basicAuth ? 1 : 0,
     basic_auth_users: JSON.stringify(h.basicAuthUsers),
-    health_check: h.healthCheck ? 1 : 0,
-    health_check_path: h.healthCheckPath,
     client_auth: h.clientAuth,
     client_cert_headers: h.clientCertHeaders ? 1 : 0,
   };
@@ -222,9 +213,9 @@ export const hosts = {
     const row = db
       .query<ProxyHostRow, any>(
         `INSERT INTO proxy_hosts (domains, device_id, device_name, target_ip, target_port, scheme, insecure_skip_verify, enabled,
-           basic_auth, basic_auth_users, health_check, health_check_path, client_auth, client_cert_headers)
+           basic_auth, basic_auth_users, client_auth, client_cert_headers)
          VALUES ($domains, $device_id, $device_name, $target_ip, $target_port, $scheme, $insecure_skip_verify, $enabled,
-           $basic_auth, $basic_auth_users, $health_check, $health_check_path, $client_auth, $client_cert_headers)
+           $basic_auth, $basic_auth_users, $client_auth, $client_cert_headers)
          RETURNING *`,
       )
       .get(toParams(h))!;
@@ -237,8 +228,7 @@ export const hosts = {
         `UPDATE proxy_hosts SET domains = $domains, device_id = $device_id, device_name = $device_name,
            target_ip = $target_ip, target_port = $target_port, scheme = $scheme,
            insecure_skip_verify = $insecure_skip_verify, enabled = $enabled, basic_auth = $basic_auth,
-           basic_auth_users = $basic_auth_users, health_check = $health_check, health_check_path = $health_check_path,
-           client_auth = $client_auth, client_cert_headers = $client_cert_headers,
+           basic_auth_users = $basic_auth_users, client_auth = $client_auth, client_cert_headers = $client_cert_headers,
            updated_at = datetime('now')
          WHERE id = $id RETURNING *`,
       )

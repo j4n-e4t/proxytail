@@ -5,8 +5,6 @@ import { clientCas, hosts, type ProxyHost } from "./db";
 const ENTRYPOINTS = ["websecure"];
 const CERT_RESOLVER = "letsencrypt";
 const TRAEFIK_API_URL = process.env.TRAEFIK_API_URL ?? "http://localhost:8080";
-export const HEALTH_CHECK_INTERVAL = "10s";
-const HEALTH_CHECK_TIMEOUT = "5s";
 
 export const routerName = (h: Pick<ProxyHost, "id">) => `proxytail-host-${h.id}`;
 
@@ -78,15 +76,6 @@ export function buildConfig() {
       servers: [{ url: `${h.scheme}://${h.targetIp}:${h.targetPort}` }],
       passHostHeader: true,
     };
-    if (h.healthCheck) {
-      // Any 2xx/3xx answer counts as healthy. The Host header matches what real requests carry.
-      loadBalancer.healthCheck = {
-        path: h.healthCheckPath,
-        interval: HEALTH_CHECK_INTERVAL,
-        timeout: HEALTH_CHECK_TIMEOUT,
-        hostname: h.domains[0],
-      };
-    }
     if (h.scheme === "https" && h.insecureSkipVerify) {
       serversTransports[name] = { insecureSkipVerify: true };
       loadBalancer.serversTransport = name;
@@ -110,8 +99,6 @@ export interface TraefikStatus {
   routers: Record<number, { status: string; errors?: string[] }>;
   /** Certificate Traefik currently serves for each enabled service's primary hostname. */
   certificates: Record<number, CertInfo>;
-  /** Health check result for services with a health check, keyed by service id. */
-  health: Record<number, { up: boolean; url: string }>;
 }
 
 const HOST_NAME_RE = /^proxytail-host-(\d+)@/;
@@ -119,10 +106,9 @@ const HOST_NAME_RE = /^proxytail-host-(\d+)@/;
 export async function traefikStatus(): Promise<TraefikStatus> {
   try {
     const signal = AbortSignal.timeout(2000);
-    const [versionRes, routersRes, servicesRes] = await Promise.all([
+    const [versionRes, routersRes] = await Promise.all([
       fetch(`${TRAEFIK_API_URL}/api/version`, { signal }),
       fetch(`${TRAEFIK_API_URL}/api/http/routers?per_page=1000`, { signal }),
-      fetch(`${TRAEFIK_API_URL}/api/http/services?per_page=1000`, { signal }),
     ]);
     if (!routersRes.ok) throw new Error(`Traefik API returned ${routersRes.status}`);
     const version = versionRes.ok ? ((await versionRes.json()) as { Version: string }).Version : undefined;
@@ -132,23 +118,11 @@ export async function traefikStatus(): Promise<TraefikStatus> {
       const m = r.name.match(HOST_NAME_RE);
       if (m) routers[Number(m[1])] = { status: r.status, errors: r.error };
     }
-    const all = hosts.list();
-    // Without a health check Traefik always reports "UP", so only trust the status of checked services.
-    const checked = new Set(all.filter((h) => h.enabled && h.healthCheck).map((h) => h.id));
-    const health: TraefikStatus["health"] = {};
-    const services = servicesRes.ok
-      ? ((await servicesRes.json()) as { name: string; serverStatus?: Record<string, string> }[])
-      : [];
-    for (const s of services) {
-      const id = Number(s.name.match(HOST_NAME_RE)?.[1]);
-      const [url, state] = Object.entries(s.serverStatus ?? {})[0] ?? [];
-      if (checked.has(id) && url) health[id] = { up: state === "UP", url };
-    }
-    const enabled = all.filter((h) => h.enabled && routers[h.id]);
+    const enabled = hosts.list().filter((h) => h.enabled && routers[h.id]);
     const certs = await Promise.all(enabled.map((h) => certificateFor(h.domains[0]!)));
     const certificates = Object.fromEntries(enabled.map((h, i) => [h.id, certs[i]!]));
-    return { reachable: true, version, routers, certificates, health };
+    return { reachable: true, version, routers, certificates };
   } catch (e) {
-    return { reachable: false, error: (e as Error).message, routers: {}, certificates: {}, health: {} };
+    return { reachable: false, error: (e as Error).message, routers: {}, certificates: {} };
   }
 }

@@ -8,7 +8,6 @@ import {
   ShieldCheck,
   ShieldEllipsis,
   ShieldX,
-  TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
 import { useState } from "react";
@@ -55,7 +54,7 @@ export interface ServiceState {
   detail: string;
 }
 
-/** One overall state per service, most severe first: route, then backend health. */
+/** One overall state per service, most severe first. */
 export function serviceState(host: ProxyHost, traefik: TraefikStatus | null): ServiceState {
   if (!host.enabled) return { tone: "muted", icon: Pause, label: "Disabled", detail: "Removed from Traefik." };
   // Mirrors buildConfig, which fails closed rather than publishing the route without the client certificate check.
@@ -78,20 +77,7 @@ export function serviceState(host: ProxyHost, traefik: TraefikStatus | null): Se
     };
   if (r.status !== "enabled")
     return { tone: "danger", icon: CircleX, label: "Route error", detail: r.errors?.join("\n") ?? r.status };
-  const health = traefik.health?.[host.id];
-  if (health && !health.up)
-    return {
-      tone: "danger",
-      icon: TriangleAlert,
-      label: "Backend down",
-      detail: `The health check of ${health.url}${host.healthCheckPath} fails, so visitors get a 503.`,
-    };
-  return {
-    tone: "success",
-    icon: Globe,
-    label: "Live",
-    detail: health ? "Routed by Traefik; the health check passes." : "Routed by Traefik. No health check is set up.",
-  };
+  return { tone: "success", icon: Globe, label: "Live", detail: "Routed by Traefik." };
 }
 
 const text = {

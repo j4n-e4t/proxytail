@@ -122,11 +122,6 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
   const basicAuth = !!raw.basicAuth;
   if (basicAuth && !basicAuthUsers.length) throw new HttpError(400, "Add at least one user to enable basic auth");
 
-  const healthCheck = raw.healthCheck === undefined ? true : !!raw.healthCheck;
-  const healthCheckPath = String(raw.healthCheckPath ?? "/").trim() || "/";
-  if (!healthCheckPath.startsWith("/") || /\s/.test(healthCheckPath))
-    throw new HttpError(400, "Health check path must start with / and contain no spaces");
-
   const clientAuth = (raw.clientAuth ?? "off") as ClientAuth;
   if (!["off", "require", "optional"].includes(clientAuth))
     throw new HttpError(400, "Client certificates must be off, require or optional");
@@ -149,8 +144,6 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
     enabled: raw.enabled === undefined ? true : !!raw.enabled,
     basicAuth,
     basicAuthUsers,
-    healthCheck,
-    healthCheckPath,
     clientAuth,
     clientCaIds,
     clientCertHeaders: clientAuth !== "off" && !!raw.clientCertHeaders,

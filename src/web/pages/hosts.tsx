@@ -196,7 +196,7 @@ export function HostsPage(props: {
                             <span className="truncate">{h.domains[0]}</span>
                             <ExternalLink className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-60" />
                           </a>
-                          {/* Healthy services let the green tile speak; anything else names the problem. */}
+                          {/* Live services let the green tile speak; anything else names the problem. */}
                           {(state.tone !== "success" || extra > 0) && (
                             <p className="mt-0.5 truncate text-xs">
                               {state.tone !== "success" && <StateLabel state={state} />}
