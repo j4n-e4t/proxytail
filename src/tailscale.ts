@@ -1,4 +1,7 @@
+import { promises as dns } from "node:dns";
+import { isIP } from "node:net";
 import { hosts, settings } from "./db";
+import { publicAddress } from "./dns";
 
 const API = "https://api.tailscale.com/api/v2";
 const DEVICE_CACHE_MS = 15_000;
@@ -92,6 +95,9 @@ interface ApiDevice {
   lastSeen?: string;
   connectedToControl?: boolean;
   authorized?: boolean;
+  /** Only with fields=all. */
+  clientVersion?: string;
+  clientConnectivity?: { endpoints?: string[] };
 }
 
 function normalize(d: ApiDevice): Device {
@@ -129,12 +135,37 @@ async function fetchDevices(): Promise<Device[]> {
     if (!res.ok) throw new TailscaleError(`Tailscale API returned ${res.status}: ${await res.text()}`);
     raw = ((await res.json()) as { devices: ApiDevice[] }).devices;
   }
+  proxyVersion = await findProxyVersion(raw);
   const { backendTag } = tailscaleConfig();
   return raw
     .filter((d) => d.tags?.includes(backendTag))
     .map(normalize)
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+
+let proxyVersion: string | null = null;
+
+/**
+ * The Tailscale version of the proxy host itself. It isn't a backend peer, so it's found among all devices by its
+ * public address: the one whose endpoints include it.
+ */
+async function findProxyVersion(raw: ApiDevice[]): Promise<string | null> {
+  const address = publicAddress();
+  if (!address) return null;
+  let ips: string[];
+  try {
+    ips = isIP(address) ? [address] : (await dns.lookup(address, { all: true })).map((a) => a.address);
+  } catch {
+    return null;
+  }
+  // Endpoints look like "203.0.113.10:41641" or "[2001:db8::1]:41641".
+  const host = (endpoint: string) => endpoint.replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
+  const self = raw.find((d) => d.clientConnectivity?.endpoints?.some((e) => ips.includes(host(e))));
+  return self?.clientVersion?.split("-")[0] ?? null;
+}
+
+/** The proxy host's Tailscale version, once devices have been listed. */
+export const tailscaleVersion = () => proxyVersion;
 
 let cache: { at: number; devices: Device[] } | null = null;
 let inflight: Promise<Device[]> | null = null;

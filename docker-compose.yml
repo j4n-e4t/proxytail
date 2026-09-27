@@ -24,10 +24,15 @@ services:
       TS_BACKEND_TAG: ${TS_BACKEND_TAG:-}
       PUBLIC_ADDRESS: ${PUBLIC_ADDRESS:-}
       UI_HOSTS: ${UI_HOSTS:-}
+      CROWDSEC_LAPI_URL: http://crowdsec:8080
+      CROWDSEC_METRICS_URL: http://crowdsec:6060/metrics
+      CROWDSEC_SECRETS_DIR: /crowdsec
     ports:
       - "127.0.0.1:${UI_PORT:-3000}:3000"
     volumes:
       - proxytail-data:/data
+      # proxytail generates the CrowdSec bouncer key and registration token here on first start.
+      - crowdsec-secrets:/crowdsec
     read_only: true
     tmpfs:
       - /tmp
@@ -47,6 +52,11 @@ services:
       - "${HTTPS_PORT:-443}:443"
     volumes:
       - traefik-acme:/letsencrypt
+      - traefik-logs:/var/log/traefik
+      - crowdsec-secrets:/run/secrets:ro
+    # Traefik downloads the CrowdSec bouncer plugin here on every start.
+    tmpfs:
+      - /plugins-storage
     read_only: true
     cap_drop:
       - ALL
@@ -74,8 +84,92 @@ services:
       - --providers.http.endpoint=http://app:3000/api/traefik/config
       - --providers.http.pollInterval=5s
       - --log.level=INFO
+      # The access log goes to a file that CrowdSec reads. It keeps the User-Agent, which some scenarios need.
       - --accesslog=true
+      - --accesslog.filepath=/var/log/traefik/access.log
+      - --accesslog.format=json
+      - --accesslog.fields.headers.names.User-Agent=keep
+      # CrowdSec's bouncer, used by services once it's enabled under Settings. Traefik fetches it from
+      # plugins.traefik.io on start.
+      - --experimental.plugins.crowdsec.modulename=github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
+      - --experimental.plugins.crowdsec.version=${CROWDSEC_BOUNCER_VERSION:-v1.7.1}
+
+  # Detects attacks in Traefik's access log and runs the Local API the bouncer asks about each client IP. Neither
+  # the API (8080) nor metrics (6060) are published: proxytail and Traefik reach them on the Docker network.
+  crowdsec:
+    image: crowdsecurity/crowdsec:${CROWDSEC_VERSION:-v1.8.1}
+    restart: unless-stopped
+    depends_on:
+      app:
+        # The app creates the secrets CrowdSec reads on start.
+        condition: service_healthy
+    environment:
+      COLLECTIONS: crowdsecurity/traefik crowdsecurity/http-cve
+    volumes:
+      - crowdsec-db:/var/lib/crowdsec/data
+      - crowdsec-config:/etc/crowdsec
+      - traefik-logs:/var/log/traefik:ro
+      - crowdsec-secrets:/run/secrets:ro
+    # The auto-registration token proxytail registers itself with (see crowdsec-local below) comes from the secrets.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - export REGISTRATION_TOKEN="$$(cat /run/secrets/registration_token)" && exec /bin/bash /docker_start.sh
+    configs:
+      - source: crowdsec-acquis
+        target: /etc/crowdsec/acquis.d/traefik.yaml
+      - source: crowdsec-local
+        target: /etc/crowdsec/config.yaml.local
+      - source: crowdsec-context
+        target: /etc/crowdsec/contexts/proxytail.yaml
+    security_opt:
+      - no-new-privileges:true
+
+  # Traefik doesn't rotate its access log, so this truncates it past 100 MB. Traefik appends, and CrowdSec follows
+  # the truncation.
+  logrotate:
+    image: busybox:stable
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - while :; do find /var/log/traefik -name access.log -size +102400k -exec truncate -s 0 {} +; sleep 300; done
+    volumes:
+      - traefik-logs:/var/log/traefik
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+configs:
+  crowdsec-acquis:
+    content: |
+      filenames:
+        - /var/log/traefik/access.log
+      labels:
+        type: traefik
+  # Lets proxytail register itself as a machine, to read alerts. CrowdSec expands the variable, not Compose.
+  crowdsec-local:
+    content: |
+      api:
+        server:
+          auto_registration:
+            enabled: true
+            token: $${REGISTRATION_TOKEN}
+            allowed_ranges: [127.0.0.1/32, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
+  # Alerts carry the hostname that was attacked, so proxytail can attribute them to services.
+  crowdsec-context:
+    content: |
+      context:
+        target_fqdn:
+          - evt.Meta.target_fqdn
 
 volumes:
   proxytail-data:
   traefik-acme:
+  traefik-logs:
+  crowdsec-secrets:
+  crowdsec-db:
+  crowdsec-config:

@@ -1,4 +1,5 @@
 import { certificateFor, type CertInfo } from "./certs";
+import { bouncerMiddleware, MIDDLEWARE as CROWDSEC_MIDDLEWARE } from "./crowdsec";
 import { clientCas, hosts, type ProxyHost } from "./db";
 
 // Every service is served over HTTPS with a Let's Encrypt certificate; plain HTTP is redirected by Traefik.
@@ -20,6 +21,7 @@ export function buildConfig() {
   const middlewares: Record<string, unknown> = {};
   const tlsOptions: Record<string, unknown> = {};
   const cas = new Map(clientCas.list().map((ca) => [ca.id, ca]));
+  const bouncer = bouncerMiddleware();
 
   for (const h of hosts.list()) {
     if (!h.enabled) continue;
@@ -31,7 +33,8 @@ export function buildConfig() {
       service: name,
       tls,
     };
-    const chain: string[] = [];
+    // CrowdSec goes first: a banned IP gets no further, not even to a basic auth prompt.
+    const chain: string[] = bouncer ? [CROWDSEC_MIDDLEWARE] : [];
     if (h.clientAuth !== "off") {
       const caPems = h.clientCaIds.map((id) => cas.get(id)?.certPem);
       // Fail closed: a service that should verify client certificates is never published without that check. The
@@ -85,6 +88,7 @@ export function buildConfig() {
 
   // Traefik rejects an empty `http` element, so omit it entirely when nothing is routed.
   if (!Object.keys(routers).length) return {};
+  if (bouncer) middlewares[CROWDSEC_MIDDLEWARE] = bouncer;
   const http: Record<string, unknown> = { routers, services };
   if (Object.keys(serversTransports).length) http.serversTransports = serversTransports;
   if (Object.keys(middlewares).length) http.middlewares = middlewares;
@@ -124,5 +128,17 @@ export async function traefikStatus(): Promise<TraefikStatus> {
     return { reachable: true, version, routers, certificates };
   } catch (e) {
     return { reachable: false, error: (e as Error).message, routers: {}, certificates: {} };
+  }
+}
+
+/** State of one of proxytail's middlewares in Traefik, e.g. whether the CrowdSec plugin loaded. */
+export async function middlewareStatus(name: string): Promise<{ status: string; errors?: string[] } | null> {
+  try {
+    const res = await fetch(`${TRAEFIK_API_URL}/api/http/middlewares/${name}@http`, { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) return null;
+    const m = (await res.json()) as { status: string; error?: string[] };
+    return { status: m.status, errors: m.error };
+  } catch {
+    return null;
   }
 }

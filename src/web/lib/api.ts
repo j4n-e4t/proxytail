@@ -98,6 +98,8 @@ export interface Settings {
   mock: boolean;
   /** Only peers with this ACL tag are listed and can be targeted. */
   backendTag: string;
+  /** The proxy host's Tailscale version, when it could be found in the tailnet. */
+  tailscaleVersion: string | null;
 }
 
 export interface CertInfo {
@@ -115,6 +117,79 @@ export interface TraefikStatus {
   error?: string;
   routers: Record<number, { status: string; errors?: string[] }>;
   certificates: Record<number, CertInfo>;
+}
+
+export interface CrowdsecConfig {
+  enabled: boolean;
+  cacheSeconds: number;
+  trustedIps: string[];
+}
+
+export interface CrowdsecView {
+  config: CrowdsecConfig;
+  status: {
+    key: boolean;
+    lapi: { reachable: boolean; keyAccepted?: boolean; error?: string };
+    metrics?: { version?: string; linesRead: number; linesParsed: number; decisions: Record<string, number> };
+  };
+  /** The bouncer middleware in Traefik, while enabled. Null until Traefik has picked it up. */
+  middleware: { status: string; errors?: string[] } | null;
+}
+
+export type StatsRange = "24h" | "7d" | "30d";
+
+export interface Ranked {
+  key: string;
+  label: string;
+  alerts: number;
+  /** Distinct source IPs. */
+  sources: number;
+  serviceId?: number | null;
+}
+
+export interface SecurityAlert {
+  id: number;
+  at: string;
+  ip: string;
+  country: string | null;
+  as: string | null;
+  scenario: string;
+  events: number;
+  hosts: string[];
+  paths: string[];
+  serviceId: number | null;
+  banned: boolean;
+}
+
+export interface Ban {
+  decisionId: number;
+  alertId: number;
+  value: string;
+  scope: string;
+  type: string;
+  origin: string;
+  scenario: string;
+  country: string | null;
+  as: string | null;
+  until: string;
+  hosts: string[];
+}
+
+export interface CrowdsecStats {
+  range: StatsRange;
+  generatedAt: string;
+  /** More alerts than the API returns at once: the oldest are left out. */
+  truncated: boolean;
+  totals: { alerts: number; sources: number; countries: number; events: number };
+  timeline: { start: string; alerts: number; sources: number }[];
+  bucketHours: number;
+  scenarios: Ranked[];
+  countries: Ranked[];
+  networks: Ranked[];
+  services: Ranked[];
+  recent: SecurityAlert[];
+  bans: Ban[];
+  metrics?: CrowdsecView["status"]["metrics"];
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -149,4 +224,12 @@ export const api = {
   saveSettings: (s: Record<string, string | null>) => request<Settings>("PUT", "/api/settings", s),
   testSettings: () => request<{ ok: boolean; devices: number }>("POST", "/api/settings/test"),
   traefik: () => request<TraefikStatus>("GET", "/api/traefik/status"),
+  crowdsec: () => request<CrowdsecView>("GET", "/api/crowdsec"),
+  saveCrowdsec: (c: Partial<CrowdsecConfig>) => request<CrowdsecView>("PUT", "/api/crowdsec", c),
+  crowdsecStats: (range: StatsRange, fresh = false) =>
+    request<CrowdsecStats>(
+      "GET",
+      `/api/crowdsec/stats?range=${range}&utcOffset=${-new Date().getTimezoneOffset()}${fresh ? "&fresh" : ""}`,
+    ),
+  unban: (decisionId: number) => request<void>("DELETE", `/api/crowdsec/decisions/${decisionId}`),
 };

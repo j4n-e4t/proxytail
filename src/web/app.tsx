@@ -7,6 +7,7 @@ import {
   Moon,
   RefreshCw,
   Settings as SettingsIcon,
+  ShieldAlert,
   ShieldCheck,
   Sun,
   Waypoints,
@@ -17,7 +18,7 @@ import { Card, CardDescription, CardFooter, CardHeader, CardTitle } from "@/comp
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { TailscaleIcon, TraefikIcon } from "@/components/brand-icons";
+import { CrowdsecIcon, TailscaleIcon, TraefikIcon } from "@/components/brand-icons";
 import { StatusDot } from "@/components/status";
 import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
@@ -25,14 +26,15 @@ import { useTheme, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ClientCasPage } from "@/pages/client-cas";
 import { PeersPage } from "@/pages/peers";
+import { RANGES, SecurityPage } from "@/pages/security";
 import { ServiceEditorDialog } from "@/pages/service-editor";
 import { DomainsPage } from "@/pages/domains";
 import { HostsPage } from "@/pages/hosts";
 import { SettingsPage } from "@/pages/settings";
 import "./globals.css";
 
-type Page = "services" | "domains" | "client-cas" | "peers" | "settings";
-const PAGES: Page[] = ["services", "domains", "client-cas", "peers", "settings"];
+type Page = "services" | "domains" | "client-cas" | "peers" | "security" | "settings";
+const PAGES: Page[] = ["services", "domains", "client-cas", "peers", "security", "settings"];
 
 interface Route {
   page: Page;
@@ -154,10 +156,12 @@ function Console() {
   const setPage = (p: Page) => navigate(p);
   const { theme, setTheme } = useTheme();
   const hosts = usePoll(api.hosts, 0);
-  const settings = usePoll(api.settings, 0);
+  // Polled for the proxy host's Tailscale version, known once devices have been listed.
+  const settings = usePoll(api.settings, 30_000);
   const domains = usePoll(api.domains, 0);
   const clientCas = usePoll(api.clientCas, 0);
   const traefik = usePoll(api.traefik, 5000);
+  const crowdsec = usePoll(api.crowdsec, 30_000);
   const devices = usePoll(
     useCallback(() => api.devices(), []),
     30_000,
@@ -213,6 +217,12 @@ function Console() {
             onClick={() => setPage("peers")}
           />
           <NavItem
+            icon={ShieldAlert}
+            label="Security"
+            active={page === "security"}
+            onClick={() => setPage("security")}
+          />
+          <NavItem
             icon={SettingsIcon}
             label="Settings"
             active={page === "settings"}
@@ -221,7 +231,7 @@ function Console() {
         </nav>
 
         <div className="space-y-1 border-t p-3">
-          {/* Connection state of the two systems proxytail drives. */}
+          {/* Connection state of the systems proxytail drives. */}
           <div className="space-y-0.5">
             <ServiceStatus
               icon={TailscaleIcon}
@@ -232,7 +242,9 @@ function Console() {
                   ? "Not configured"
                   : devices.error
                     ? "Error"
-                    : `${devices.data?.filter((d) => d.online).length ?? "…"} ${devices.data?.filter((d) => d.online).length === 1 ? "peer" : "peers"} online`
+                    : settings.data?.tailscaleVersion
+                      ? `v${settings.data.tailscaleVersion}`
+                      : "Connected"
               }
               title={devices.error ?? undefined}
             />
@@ -240,8 +252,27 @@ function Console() {
               icon={TraefikIcon}
               ok={!!traefik.data?.reachable}
               label="Traefik"
-              detail={traefik.data?.reachable ? `v${traefik.data.version} · connected` : "Unreachable"}
+              detail={traefik.data?.reachable ? `v${traefik.data.version}` : "Unreachable"}
               title={traefik.data?.error}
+            />
+            <ServiceStatus
+              icon={CrowdsecIcon}
+              ok={!!crowdsec.data?.status.lapi.reachable && crowdsec.data.status.lapi.keyAccepted !== false}
+              label="CrowdSec"
+              detail={
+                !crowdsec.data
+                  ? crowdsec.error
+                    ? "Error"
+                    : "…"
+                  : !crowdsec.data.status.lapi.reachable
+                    ? "Unreachable"
+                    : crowdsec.data.status.lapi.keyAccepted === false
+                      ? "Key rejected"
+                      : crowdsec.data.status.metrics?.version
+                        ? `v${crowdsec.data.status.metrics.version}`
+                        : "Connected"
+              }
+              title={crowdsec.data?.status.lapi.error ?? crowdsec.error ?? undefined}
             />
           </div>
           <div className="flex items-center justify-between px-3 pt-2">
@@ -271,7 +302,7 @@ function Console() {
       </aside>
 
       <main className="min-w-0 flex-1">
-        <div className="max-w-screen-2xl px-6 py-8 lg:px-10">
+        <div className="px-6 py-8 lg:px-10">
           {page === "services" && (
             <HostsPage
               hosts={hosts.data}
@@ -311,6 +342,15 @@ function Console() {
               onRefresh={async () => devices.setData(await api.devices(true))}
               onExpose={(d) => navigate(`services/new?peer=${encodeURIComponent(d.id)}`)}
               onOpenSettings={() => setPage("settings")}
+            />
+          )}
+          {page === "security" && (
+            <SecurityPage
+              range={RANGES.find((r) => r.value === route.params.get("range"))?.value ?? "24h"}
+              onRange={(r) => navigate(r === "24h" ? "security" : `security?range=${r}`)}
+              crowdsec={crowdsec.data}
+              onOpenSettings={() => setPage("settings")}
+              onOpenService={(id) => navigate(`services/${id}`)}
             />
           )}
           {page === "settings" && settings.data && (

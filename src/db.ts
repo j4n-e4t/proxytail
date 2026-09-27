@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { CertSummary } from "./pki";
 
-const dataDir = process.env.DATA_DIR ?? join(import.meta.dir, "..", "data");
+export const dataDir = process.env.DATA_DIR ?? join(import.meta.dir, "..", "data");
 mkdirSync(dataDir, { recursive: true });
 
 export const db = new Database(join(dataDir, "proxytail.db"), { create: true, strict: true });
@@ -374,7 +374,14 @@ export const clientCas = {
   },
 };
 
-export type SettingKey = "public_address" | "backend_tag";
+export type SettingKey =
+  | "public_address"
+  | "backend_tag"
+  | "crowdsec_enabled"
+  | "crowdsec_cache_seconds"
+  | "crowdsec_trusted_ips"
+  | "crowdsec_machine_id"
+  | "crowdsec_machine_password";
 
 export const settings = {
   get(key: SettingKey): string | undefined {
