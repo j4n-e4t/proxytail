@@ -4,3 +4,6 @@ data
 *.tsbuildinfo
 .DS_Store
 dist
+
+# Terraform
+terraform

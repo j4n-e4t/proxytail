@@ -26,7 +26,7 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PageHeader } from "@/components/page-header";
 import { DeviceBadge } from "@/components/device-badge";
-import { RouterBadge } from "@/components/status";
+import { CertBadge, RouterBadge } from "@/components/status";
 import { api, type Device, type ProxyHost, type TraefikStatus } from "@/lib/api";
 import { targetUrl } from "@/lib/utils";
 
@@ -168,7 +168,7 @@ export function HostsPage(props: {
                         </div>
                         <div className="min-w-0">
                           <a
-                            href={`http://${h.domains[0]}`}
+                            href={`https://${h.domains[0]}`}
                             target="_blank"
                             rel="noreferrer"
                             className="group inline-flex items-center gap-1.5 font-medium hover:underline"
@@ -194,7 +194,10 @@ export function HostsPage(props: {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <RouterBadge host={h} traefik={traefik} />
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <RouterBadge host={h} traefik={traefik} />
+                        <CertBadge host={h} traefik={traefik} />
+                      </div>
                     </TableCell>
                     <TableCell>
                       <Switch checked={h.enabled} onCheckedChange={(v) => toggle(h, v)} aria-label="Enabled" />
@@ -211,7 +214,7 @@ export function HostsPage(props: {
                             <Pencil /> Edit
                           </DropdownMenuItem>
                           <DropdownMenuItem asChild>
-                            <a href={`http://${h.domains[0]}`} target="_blank" rel="noreferrer">
+                            <a href={`https://${h.domains[0]}`} target="_blank" rel="noreferrer">
                               <ExternalLink /> Open
                             </a>
                           </DropdownMenuItem>

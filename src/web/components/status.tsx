@@ -1,3 +1,4 @@
+import { ShieldAlert, ShieldCheck, ShieldEllipsis } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ProxyHost, TraefikStatus } from "@/lib/api";
@@ -64,6 +65,43 @@ export function RouterBadge({ host, traefik }: { host: ProxyHost; traefik: Traef
         </span>
       </TooltipTrigger>
       <TooltipContent className="max-w-sm">{r.errors?.join("\n") ?? r.status}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function daysUntil(iso?: string) {
+  return iso ? Math.round((new Date(iso).getTime() - Date.now()) / 86_400_000) : undefined;
+}
+
+/** HTTPS certificate state as observed on Traefik's websecure entrypoint. */
+export function CertBadge({ host, traefik }: { host: ProxyHost; traefik: TraefikStatus | null }) {
+  if (!host.enabled || !traefik?.reachable) return null;
+  const cert = traefik.certificates?.[host.id];
+  if (!cert) return null;
+  const days = daysUntil(cert.validTo);
+  const [t, Icon, label, detail] =
+    cert.state === "valid"
+      ? (["success", ShieldCheck, "HTTPS", `${cert.issuer} · expires in ${days} days`] as const)
+      : cert.state === "untrusted"
+        ? (["warning", ShieldAlert, "Untrusted", `${cert.issuer ?? "Unknown issuer"} — ${cert.error}`] as const)
+        : cert.state === "pending"
+          ? ([
+              "warning",
+              ShieldEllipsis,
+              "Issuing",
+              "Traefik is still requesting a Let's Encrypt certificate. Port 80 must be reachable from the internet for the HTTP challenge.",
+            ] as const)
+          : (["danger", ShieldAlert, "TLS error", cert.error ?? "Could not check the certificate"] as const);
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span>
+          <ToneBadge t={t}>
+            <Icon className="size-3" /> {label}
+          </ToneBadge>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-sm">{detail}</TooltipContent>
     </Tooltip>
   );
 }

@@ -40,14 +40,17 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    # Traefik shares this container's network namespace, so its public port is published here.
+    # Traefik shares this container's network namespace, so its public ports are published here.
     ports:
       - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
 
   traefik:
     image: traefik:v3.5
     restart: unless-stopped
     network_mode: service:tailscale
+    volumes:
+      - traefik-acme:/letsencrypt
     depends_on:
       tailscale:
         condition: service_started
@@ -55,6 +58,17 @@ services:
         condition: service_healthy
     command:
       - --entrypoints.web.address=:80
+      # All HTTP traffic is redirected to HTTPS (ACME HTTP-01 challenges on :80 are still answered first).
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.web.http.redirections.entrypoint.permanent=true
+      - --entrypoints.websecure.address=:443
+      # Let's Encrypt via the HTTP-01 challenge: every service gets a certificate automatically.
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-}
+      - --certificatesresolvers.letsencrypt.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}
       # Internal API (port 8080, not published) — proxytail reads router status from it.
       - --api.insecure=true
       - --providers.http.endpoint=http://app:3000/api/traefik/config
@@ -65,3 +79,4 @@ services:
 volumes:
   proxytail-data:
   tailscale-state:
+  traefik-acme:

@@ -26,7 +26,10 @@ docker compose up -d    # proxytail + Tailscale sidecar + Traefik
 
 - The UI listens on `127.0.0.1:3000`. It has no authentication yet, so keep it on localhost or a private interface
   (`UI_BIND`, `UI_PORT`).
-- Traefik serves public traffic on port 80 (`HTTP_PORT`). Its API stays internal.
+- Traefik serves public traffic on ports 80 and 443 (`HTTP_PORT` and `HTTPS_PORT`). Port 80 is required for
+  Let's Encrypt's HTTP-01 challenge and redirects all other requests to HTTPS. Its API stays internal.
+- Every enabled service receives a Let's Encrypt certificate automatically. Keep port 80 reachable from the internet,
+  point each hostname at the public address, and persist the `traefik-acme` volume so certificates survive restarts.
 - `TS_AUTHKEY` is only needed on first start. The node identity is kept in the `tailscale-state` volume, and app data
   in `proxytail-data`.
 - Pin a release with `PROXYTAIL_IMAGE=ghcr.io/j4n-e4t/proxytail:0.1.0`, or build locally with
@@ -70,4 +73,4 @@ docker compose -f docker-compose.dev.yml up -d  # Traefik + Tailscale sidecar, p
 
 ## Not implemented yet
 
-Authentication for the UI and the config endpoint, TLS/ACME, and SSO/forward-auth.
+Authentication for the UI and the config endpoint, and SSO/forward-auth.

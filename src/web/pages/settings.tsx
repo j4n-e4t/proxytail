@@ -146,7 +146,7 @@ export function SettingsPage({
           <CardHeader>
             <CardTitle>Public address</CardTitle>
             <CardDescription>
-              Where your domains' DNS should point: the public IP (or hostname) that reaches Traefik on port 80.
+              Where your domains' DNS should point: the public IP (or hostname) that reaches Traefik on ports 80 and 443.
             </CardDescription>
             <CardAction>
               {settings.publicAddress ? (

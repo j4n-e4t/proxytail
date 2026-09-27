@@ -1,6 +1,9 @@
+import { certificateFor, type CertInfo } from "./certs";
 import { hosts, type ProxyHost } from "./db";
 
-const ENTRYPOINTS = (process.env.TRAEFIK_ENTRYPOINTS ?? "web").split(",").map((s) => s.trim());
+// Every service is served over HTTPS with a Let's Encrypt certificate; plain HTTP is redirected by Traefik.
+const ENTRYPOINTS = ["websecure"];
+const CERT_RESOLVER = "letsencrypt";
 const TRAEFIK_API_URL = process.env.TRAEFIK_API_URL ?? "http://localhost:8080";
 
 export const routerName = (h: Pick<ProxyHost, "id">) => `proxytail-host-${h.id}`;
@@ -18,6 +21,7 @@ export function buildConfig() {
       rule: h.domains.map((d) => `Host(\`${d}\`)`).join(" || "),
       entryPoints: ENTRYPOINTS,
       service: name,
+      tls: { certResolver: CERT_RESOLVER },
     };
     const loadBalancer: Record<string, unknown> = {
       servers: [{ url: `${h.scheme}://${h.targetIp}:${h.targetPort}` }],
@@ -43,6 +47,8 @@ export interface TraefikStatus {
   error?: string;
   /** Router status keyed by service (proxy host) id. */
   routers: Record<number, { status: string; errors?: string[] }>;
+  /** Certificate Traefik currently serves for each enabled service's primary hostname. */
+  certificates: Record<number, CertInfo>;
 }
 
 export async function traefikStatus(): Promise<TraefikStatus> {
@@ -60,8 +66,11 @@ export async function traefikStatus(): Promise<TraefikStatus> {
       const m = r.name.match(/^proxytail-host-(\d+)@/);
       if (m) routers[Number(m[1])] = { status: r.status, errors: r.error };
     }
-    return { reachable: true, version, routers };
+    const enabled = hosts.list().filter((h) => h.enabled && routers[h.id]);
+    const certs = await Promise.all(enabled.map((h) => certificateFor(h.domains[0]!)));
+    const certificates = Object.fromEntries(enabled.map((h, i) => [h.id, certs[i]!]));
+    return { reachable: true, version, routers, certificates };
   } catch (e) {
-    return { reachable: false, error: (e as Error).message, routers: {} };
+    return { reachable: false, error: (e as Error).message, routers: {}, certificates: {} };
   }
 }

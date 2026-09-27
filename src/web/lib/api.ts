@@ -61,11 +61,21 @@ export interface Settings {
   oauthClientSecretSet: boolean;
 }
 
+export interface CertInfo {
+  state: "valid" | "untrusted" | "pending" | "error";
+  issuer?: string;
+  subject?: string;
+  validTo?: string;
+  error?: string;
+  checkedAt: string;
+}
+
 export interface TraefikStatus {
   reachable: boolean;
   version?: string;
   error?: string;
   routers: Record<number, { status: string; errors?: string[] }>;
+  certificates: Record<number, CertInfo>;
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {

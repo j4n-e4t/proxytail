@@ -23,16 +23,31 @@ services:
       - host.docker.internal:host-gateway
     ports:
       - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
       - "${TRAEFIK_DASHBOARD_PORT:-8080}:8080"
     restart: unless-stopped
 
   traefik:
     image: traefik:v3.5
     network_mode: service:tailscale
+    volumes:
+      - traefik-acme:/letsencrypt
     depends_on:
       - tailscale
     command:
       - --entrypoints.web.address=:80
+      # All HTTP traffic is redirected to HTTPS (ACME HTTP-01 challenges on :80 are still answered first).
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.web.http.redirections.entrypoint.permanent=true
+      - --entrypoints.websecure.address=:443
+      # Let's Encrypt via the HTTP-01 challenge. Dev defaults to the staging CA (untrusted certs, generous rate
+      # limits) since a dev machine usually isn't reachable from the internet; set ACME_CA_SERVER to override.
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-}
+      - --certificatesresolvers.letsencrypt.acme.caserver=${ACME_CA_SERVER:-https://acme-staging-v02.api.letsencrypt.org/directory}
       - --api.insecure=true
       - --providers.http.endpoint=http://host.docker.internal:${PORT:-3000}/api/traefik/config
       - --providers.http.pollInterval=5s
@@ -66,3 +81,4 @@ services:
 
 volumes:
   tailscale-state:
+  traefik-acme:
