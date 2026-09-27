@@ -1,7 +1,18 @@
+import type { Server } from "bun";
 import index from "./web/index.html";
-import { domains as domainStore, hosts, settings, type ProxyHost, type ProxyHostInput } from "./db";
+import { authenticate, CAPABILITY, checkBrowserOrigin, isLocalService, type Role, type Session } from "./auth";
+import { domains as domainStore, hosts, settings, type BasicAuthUser, type ProxyHost, type ProxyHostInput } from "./db";
 import { checkDomain, detectPublicIp, publicAddress, requiredRecord } from "./dns";
-import { clearDeviceCache, isConfigured, listDevices, tailscaleConfig, TailscaleError } from "./tailscale";
+import { faviconFor } from "./favicons";
+import {
+  clearDeviceCache,
+  deviceSource,
+  isConfigured,
+  listDevices,
+  normalizeTag,
+  tailscaleConfig,
+  TailscaleError,
+} from "./tailscale";
 import { buildConfig, traefikStatus } from "./traefik";
 
 class HttpError extends Error {
@@ -15,10 +26,27 @@ class HttpError extends Error {
 
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 
-function handle<T extends Request>(fn: (req: T) => Promise<Response> | Response) {
-  return async (req: T) => {
+/**
+ * Who may call a route: a tailnet user with at least that role, or Traefik polling from loopback (admins can read its
+ * config too; it contains basic auth hashes).
+ */
+type Access = Role | "traefik";
+
+async function authorize(req: Request, server: Server<unknown>, access: Access): Promise<Session> {
+  if (access === "traefik" && isLocalService(req, server)) return { identity: null, role: null };
+  const rejected = await checkBrowserOrigin(req);
+  if (rejected) throw new HttpError(403, rejected);
+  const session = await authenticate(req, server);
+  if (!session.role) throw new HttpError(403, session.reason ?? "Access denied");
+  if (access !== "viewer" && session.role !== "admin")
+    throw new HttpError(403, `Read-only access: this needs the admin role in ${CAPABILITY}`);
+  return session;
+}
+
+function handle<T extends Request>(access: Access, fn: (req: T, session: Session) => Promise<Response> | Response) {
+  return async (req: T, server: Server<unknown>) => {
     try {
-      return await fn(req);
+      return await fn(req, await authorize(req, server, access));
     } catch (e) {
       if (e instanceof HttpError || e instanceof TailscaleError) return json({ error: e.message }, e.status);
       console.error(e);
@@ -73,14 +101,15 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
   if (!scheme) throw new HttpError(400, "Scheme must be http or https");
 
   const deviceId = String(raw.deviceId ?? "");
-  if (!deviceId) throw new HttpError(400, "A target device is required");
+  if (!deviceId) throw new HttpError(400, "A target peer is required");
 
   let deviceName: string;
   let targetIp: string;
   const unchanged = existing && existing.deviceId === deviceId;
   try {
     const device = (await listDevices()).find((d) => d.id === deviceId);
-    if (!device) throw new HttpError(400, "Target device not found in tailnet");
+    if (!device)
+      throw new HttpError(400, `Target peer not found in tailnet or not tagged ${tailscaleConfig().backendTag}`);
     if (!device.ipv4) throw new HttpError(400, `${device.name} has no Tailscale IPv4 address`);
     deviceName = device.name;
     targetIp = device.ipv4;
@@ -91,6 +120,15 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
     targetIp = existing.targetIp;
   }
 
+  const basicAuthUsers = await validateBasicAuth(raw.basicAuthUsers, existing?.basicAuthUsers ?? []);
+  const basicAuth = !!raw.basicAuth;
+  if (basicAuth && !basicAuthUsers.length) throw new HttpError(400, "Add at least one user to enable basic auth");
+
+  const healthCheck = raw.healthCheck === undefined ? true : !!raw.healthCheck;
+  const healthCheckPath = String(raw.healthCheckPath ?? "/").trim() || "/";
+  if (!healthCheckPath.startsWith("/") || /\s/.test(healthCheckPath))
+    throw new HttpError(400, "Health check path must start with / and contain no spaces");
+
   return {
     domains: [...new Set(domains)],
     deviceId,
@@ -100,8 +138,47 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
     scheme,
     insecureSkipVerify: !!raw.insecureSkipVerify,
     enabled: raw.enabled === undefined ? true : !!raw.enabled,
+    basicAuth,
+    basicAuthUsers,
+    healthCheck,
+    healthCheckPath,
   };
 }
+
+const USERNAME_RE = /^[^\s:]{1,64}$/;
+const MIN_PASSWORD = 8;
+
+/**
+ * Resolves submitted basic auth users to stored credentials. A user without a password keeps the hash stored under
+ * `previous` (its name before a rename) or its current name.
+ */
+async function validateBasicAuth(raw: unknown, existing: BasicAuthUser[]): Promise<BasicAuthUser[]> {
+  if (!Array.isArray(raw)) return [];
+  const users: BasicAuthUser[] = [];
+  for (const u of raw as { username?: unknown; password?: unknown; previous?: unknown; hash?: unknown }[]) {
+    const username = String(u.username ?? "").trim();
+    if (!USERNAME_RE.test(username))
+      throw new HttpError(400, `Invalid username "${username}": use up to 64 characters without spaces or colons`);
+    if (users.some((x) => x.username === username)) throw new HttpError(400, `Duplicate username: ${username}`);
+    const password = typeof u.password === "string" ? u.password : "";
+    if (password) {
+      if (password.length < MIN_PASSWORD)
+        throw new HttpError(400, `Password for ${username} must be at least ${MIN_PASSWORD} characters`);
+      // Traefik's htpasswd parser recognises the $2y$ bcrypt prefix; the hash itself is identical to $2b$.
+      const hash = (await Bun.password.hash(password, { algorithm: "bcrypt", cost: 10 })).replace(/^\$2b\$/, "$2y$");
+      users.push({ username, hash });
+      continue;
+    }
+    const previous = typeof u.previous === "string" ? u.previous : username;
+    const kept = existing.find((x) => x.username === previous);
+    if (!kept) throw new HttpError(400, `Set a password for ${username}`);
+    users.push({ username, hash: kept.hash });
+  }
+  return users;
+}
+
+/** Hosts as returned by the API: password hashes never leave the server. */
+const hostView = (h: ProxyHost) => ({ ...h, basicAuthUsers: h.basicAuthUsers.map((u) => ({ username: u.username })) });
 
 function domainView(d: ReturnType<typeof domainStore.list>[number]) {
   const all = hosts.list();
@@ -117,11 +194,9 @@ function settingsView() {
   return {
     publicAddress: publicAddress(),
     configured: isConfigured(),
+    source: deviceSource(),
     mock: !!process.env.TS_MOCK_DEVICES,
-    tailnet: c.tailnet,
-    apiKeySet: !!c.apiKey,
-    oauthClientId: c.oauthClientId,
-    oauthClientSecretSet: !!c.oauthClientSecret,
+    backendTag: c.backendTag,
   };
 }
 
@@ -134,30 +209,47 @@ const server = Bun.serve({
     "/*": index,
 
     "/api/hosts": {
-      GET: () => json(hosts.list()),
-      POST: handle(async (req) => json(hosts.create(await validateHost(await body(req))), 201)),
+      GET: handle("viewer", () => json(hosts.list().map(hostView))),
+      POST: handle("admin", async (req) => json(hostView(hosts.create(await validateHost(await body(req)))), 201)),
     },
-    "/api/hosts/:id": {
-      GET: handle((req) => {
+    "/api/hosts/:id/favicon": {
+      GET: handle("viewer", async (req) => {
         const h = hosts.get(parseId(req.params.id));
         if (!h) throw new HttpError(404, "Service not found");
-        return json(h);
+        const icon = await faviconFor(h);
+        if (!icon) return new Response(null, { status: 404, headers: { "Cache-Control": "private, max-age=600" } });
+        return new Response(icon.body, {
+          headers: {
+            "Content-Type": icon.type,
+            "Cache-Control": "private, max-age=3600",
+            // The bytes come from the backend: never let an SVG run script if it's opened directly.
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            "X-Content-Type-Options": "nosniff",
+          },
+        });
       }),
-      PUT: handle(async (req) => {
+    },
+    "/api/hosts/:id": {
+      GET: handle("viewer", (req) => {
+        const h = hosts.get(parseId(req.params.id));
+        if (!h) throw new HttpError(404, "Service not found");
+        return json(hostView(h));
+      }),
+      PUT: handle("admin", async (req) => {
         const existing = hosts.get(parseId(req.params.id));
         if (!existing) throw new HttpError(404, "Service not found");
         const patch = await body<Record<string, unknown>>(req);
-        return json(hosts.update(existing.id, await validateHost({ ...existing, ...patch }, existing)));
+        return json(hostView(hosts.update(existing.id, await validateHost({ ...existing, ...patch }, existing))!));
       }),
-      DELETE: handle((req) => {
+      DELETE: handle("admin", (req) => {
         if (!hosts.delete(parseId(req.params.id))) throw new HttpError(404, "Service not found");
         return new Response(null, { status: 204 });
       }),
     },
 
     "/api/domains": {
-      GET: () => json(domainStore.list().map(domainView)),
-      POST: handle(async (req) => {
+      GET: handle("viewer", () => json(domainStore.list().map(domainView))),
+      POST: handle("admin", async (req) => {
         const name = String((await body<{ name?: string }>(req)).name ?? "")
           .trim()
           .toLowerCase()
@@ -172,14 +264,14 @@ const server = Bun.serve({
       }),
     },
     "/api/domains/:id/verify": {
-      POST: handle(async (req) => {
+      POST: handle("admin", async (req) => {
         const d = domainStore.get(parseId(req.params.id));
         if (!d) throw new HttpError(404, "Domain not found");
         return json(domainView(domainStore.saveCheck(d.id, await checkDomain(d.name))));
       }),
     },
     "/api/domains/:id": {
-      DELETE: handle((req) => {
+      DELETE: handle("admin", (req) => {
         const d = domainStore.get(parseId(req.params.id));
         if (!d) throw new HttpError(404, "Domain not found");
         const used = hosts.list().filter((h) => h.domains.some((x) => domainStore.match(x)?.id === d.id));
@@ -191,29 +283,30 @@ const server = Bun.serve({
     },
 
     "/api/devices": {
-      GET: handle(async (req) => json(await listDevices(new URL(req.url).searchParams.has("refresh")))),
+      GET: handle("viewer", async (req) => json(await listDevices(new URL(req.url).searchParams.has("refresh")))),
     },
 
     "/api/settings": {
-      GET: () => json(settingsView()),
-      PUT: handle(async (req) => {
+      GET: handle("viewer", () => json(settingsView())),
+      PUT: handle("admin", async (req) => {
         const b = await body<Record<string, string | null | undefined>>(req);
         // `undefined` leaves a value untouched, `null`/"" clears it (falls back to env).
         if (b.publicAddress !== undefined) settings.set("public_address", b.publicAddress?.trim() ?? null);
-        if (b.tailnet !== undefined) settings.set("tailnet", b.tailnet?.trim() ?? null);
-        if (b.apiKey !== undefined) settings.set("ts_api_key", b.apiKey?.trim() ?? null);
-        if (b.oauthClientId !== undefined) settings.set("ts_oauth_client_id", b.oauthClientId?.trim() ?? null);
-        if (b.oauthClientSecret !== undefined)
-          settings.set("ts_oauth_client_secret", b.oauthClientSecret?.trim() ?? null);
+        if (b.backendTag !== undefined) {
+          const tag = b.backendTag?.trim() ? normalizeTag(b.backendTag) : null;
+          if (b.backendTag?.trim() && !tag)
+            throw new HttpError(400, "Tags must start with a letter and contain only letters, numbers and dashes");
+          settings.set("backend_tag", tag);
+        }
         clearDeviceCache();
         return json(settingsView());
       }),
     },
     "/api/settings/detect-ip": {
-      POST: handle(async () => json({ ip: await detectPublicIp() })),
+      POST: handle("admin", async () => json({ ip: await detectPublicIp() })),
     },
     "/api/settings/test": {
-      POST: handle(async () => {
+      POST: handle("viewer", async () => {
         const devices = await listDevices(true);
         return json({ ok: true, devices: devices.length });
       }),
@@ -221,9 +314,19 @@ const server = Bun.serve({
 
     "/api/health": { GET: () => json({ ok: true }) },
 
+    // The current user; also answers when access is denied, so the UI can explain why.
+    "/api/me": {
+      GET: async (req, server) => {
+        const rejected = await checkBrowserOrigin(req);
+        const session: Session = rejected ? { identity: null, role: null, reason: rejected } : await authenticate(req, server);
+        // No identity but a role: authentication is bypassed (UI_AUTH).
+        return json({ ...session, capability: CAPABILITY, authDisabled: !!session.role && !session.identity });
+      },
+    },
+
     // Polled by Traefik's HTTP provider.
-    "/api/traefik/config": { GET: () => json(buildConfig()) },
-    "/api/traefik/status": { GET: async () => json(await traefikStatus()) },
+    "/api/traefik/config": { GET: handle("traefik", () => json(buildConfig())) },
+    "/api/traefik/status": { GET: handle("viewer", async () => json(await traefikStatus())) },
   },
   development: process.env.NODE_ENV !== "production" && { hmr: true, console: true },
 });

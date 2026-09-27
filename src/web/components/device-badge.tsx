@@ -13,7 +13,7 @@ export function DeviceBadge(props: { device?: Device; name: string; ip?: string;
         "inline-flex h-7 max-w-full items-center gap-2 rounded-md border bg-muted/50 pr-2.5 pl-2 text-sm font-medium",
         props.className,
       )}
-      title={[device?.fqdn ?? props.name, device?.ipv4 ?? props.ip, device ? status : "not found in tailnet"]
+      title={[device?.fqdn ?? props.name, device?.ipv4 ?? props.ip, device ? status : "untagged or not in tailnet"]
         .filter(Boolean)
         .join(" · ")}
     >

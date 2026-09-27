@@ -8,14 +8,29 @@ export interface ProxyHost {
   scheme: "http" | "https";
   insecureSkipVerify: boolean;
   enabled: boolean;
+  basicAuth: boolean;
+  basicAuthUsers: { username: string }[];
+  healthCheck: boolean;
+  healthCheckPath: string;
   createdAt: string;
   updatedAt: string;
 }
 
 export type ProxyHostDraft = Pick<
   ProxyHost,
-  "domains" | "deviceId" | "targetPort" | "scheme" | "insecureSkipVerify" | "enabled"
->;
+    | "domains"
+  | "deviceId"
+  | "targetPort"
+  | "scheme"
+  | "insecureSkipVerify"
+  | "enabled"
+  | "basicAuth"
+  | "healthCheck"
+  | "healthCheckPath"
+> & {
+  /** Omit `password` to keep the stored one; `previous` is the username before a rename. */
+  basicAuthUsers: { username: string; password?: string; previous?: string }[];
+};
 
 export interface Device {
   id: string;
@@ -51,14 +66,24 @@ export interface Domain {
   hostCount: number;
 }
 
+export interface Me {
+  identity: { login: string; name: string; profilePicUrl: string | null; device: string } | null;
+  role: "admin" | "viewer" | null;
+  /** Why access was denied. */
+  reason?: string;
+  /** App capability name roles are granted under in the tailnet policy. */
+  capability: string;
+  authDisabled: boolean;
+}
+
 export interface Settings {
   publicAddress: string;
   configured: boolean;
+  /** Where peers are listed from: the local tailscaled or a mock file. */
+  source: "local" | "mock" | null;
   mock: boolean;
-  tailnet: string;
-  apiKeySet: boolean;
-  oauthClientId: string;
-  oauthClientSecretSet: boolean;
+  /** Only peers with this ACL tag are listed and can be targeted. */
+  backendTag: string;
 }
 
 export interface CertInfo {
@@ -76,6 +101,8 @@ export interface TraefikStatus {
   error?: string;
   routers: Record<number, { status: string; errors?: string[] }>;
   certificates: Record<number, CertInfo>;
+  /** Only present for services with a health check. */
+  health: Record<number, { up: boolean; url: string }>;
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -91,6 +118,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
+  me: () => request<Me>("GET", "/api/me"),
   hosts: () => request<ProxyHost[]>("GET", "/api/hosts"),
   createHost: (h: ProxyHostDraft) => request<ProxyHost>("POST", "/api/hosts", h),
   updateHost: (id: number, h: Partial<ProxyHostDraft>) => request<ProxyHost>("PUT", `/api/hosts/${id}`, h),

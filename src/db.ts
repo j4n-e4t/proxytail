@@ -24,12 +24,29 @@ db.run(`
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `);
+// Columns added after the initial release.
+const hostColumns = db.query<{ name: string }, []>("PRAGMA table_info(proxy_hosts)").all().map((c) => c.name);
+if (!hostColumns.includes("basic_auth")) {
+  db.run("ALTER TABLE proxy_hosts ADD COLUMN basic_auth INTEGER NOT NULL DEFAULT 0");
+  db.run("ALTER TABLE proxy_hosts ADD COLUMN basic_auth_users TEXT NOT NULL DEFAULT '[]'");
+}
+// Off for services created before health checks existed, so a failing check can't take a working route offline.
+if (!hostColumns.includes("health_check")) {
+  db.run("ALTER TABLE proxy_hosts ADD COLUMN health_check INTEGER NOT NULL DEFAULT 0");
+  db.run("ALTER TABLE proxy_hosts ADD COLUMN health_check_path TEXT NOT NULL DEFAULT '/'");
+}
+
 db.run(`
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   )
 `);
+
+// Tailscale API credentials were removed: peers and identities come from the local tailscaled.
+db.run(
+  "DELETE FROM settings WHERE key IN ('tailnet', 'ts_api_key', 'ts_oauth_client_id', 'ts_oauth_client_secret')",
+);
 
 db.run(`
   CREATE TABLE IF NOT EXISTS domains (
@@ -43,6 +60,12 @@ db.run(`
 
 export type Scheme = "http" | "https";
 
+/** A basic auth credential; `hash` is an htpasswd-compatible bcrypt hash. */
+export interface BasicAuthUser {
+  username: string;
+  hash: string;
+}
+
 export interface ProxyHost {
   id: number;
   domains: string[];
@@ -53,6 +76,11 @@ export interface ProxyHost {
   scheme: Scheme;
   insecureSkipVerify: boolean;
   enabled: boolean;
+  basicAuth: boolean;
+  basicAuthUsers: BasicAuthUser[];
+  /** Traefik probes the backend and marks it down when the check fails. */
+  healthCheck: boolean;
+  healthCheckPath: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -69,6 +97,10 @@ interface ProxyHostRow {
   scheme: Scheme;
   insecure_skip_verify: number;
   enabled: number;
+  basic_auth: number;
+  basic_auth_users: string;
+  health_check: number;
+  health_check_path: string;
   created_at: string;
   updated_at: string;
 }
@@ -84,6 +116,10 @@ function toHost(r: ProxyHostRow): ProxyHost {
     scheme: r.scheme,
     insecureSkipVerify: !!r.insecure_skip_verify,
     enabled: !!r.enabled,
+    basicAuth: !!r.basic_auth,
+    basicAuthUsers: JSON.parse(r.basic_auth_users),
+    healthCheck: !!r.health_check,
+    healthCheckPath: r.health_check_path,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -99,6 +135,10 @@ function toParams(h: ProxyHostInput) {
     scheme: h.scheme,
     insecure_skip_verify: h.insecureSkipVerify ? 1 : 0,
     enabled: h.enabled ? 1 : 0,
+    basic_auth: h.basicAuth ? 1 : 0,
+    basic_auth_users: JSON.stringify(h.basicAuthUsers),
+    health_check: h.healthCheck ? 1 : 0,
+    health_check_path: h.healthCheckPath,
   };
 }
 
@@ -113,8 +153,10 @@ export const hosts = {
   create(h: ProxyHostInput): ProxyHost {
     const row = db
       .query<ProxyHostRow, any>(
-        `INSERT INTO proxy_hosts (domains, device_id, device_name, target_ip, target_port, scheme, insecure_skip_verify, enabled)
-         VALUES ($domains, $device_id, $device_name, $target_ip, $target_port, $scheme, $insecure_skip_verify, $enabled)
+        `INSERT INTO proxy_hosts (domains, device_id, device_name, target_ip, target_port, scheme, insecure_skip_verify, enabled,
+           basic_auth, basic_auth_users, health_check, health_check_path)
+         VALUES ($domains, $device_id, $device_name, $target_ip, $target_port, $scheme, $insecure_skip_verify, $enabled,
+           $basic_auth, $basic_auth_users, $health_check, $health_check_path)
          RETURNING *`,
       )
       .get(toParams(h))!;
@@ -125,7 +167,9 @@ export const hosts = {
       .query<ProxyHostRow, any>(
         `UPDATE proxy_hosts SET domains = $domains, device_id = $device_id, device_name = $device_name,
            target_ip = $target_ip, target_port = $target_port, scheme = $scheme,
-           insecure_skip_verify = $insecure_skip_verify, enabled = $enabled, updated_at = datetime('now')
+           insecure_skip_verify = $insecure_skip_verify, enabled = $enabled, basic_auth = $basic_auth,
+           basic_auth_users = $basic_auth_users, health_check = $health_check, health_check_path = $health_check_path,
+           updated_at = datetime('now')
          WHERE id = $id RETURNING *`,
       )
       .get({ ...toParams(h), id });
@@ -212,7 +256,7 @@ export const domains = {
   },
 };
 
-export type SettingKey = "public_address" | "tailnet" | "ts_api_key" | "ts_oauth_client_id" | "ts_oauth_client_secret";
+export type SettingKey = "public_address" | "backend_tag";
 
 export const settings = {
   get(key: SettingKey): string | undefined {

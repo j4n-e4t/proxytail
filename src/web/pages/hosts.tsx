@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,9 +27,9 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PageHeader } from "@/components/page-header";
 import { DeviceBadge } from "@/components/device-badge";
-import { CertBadge, RouterBadge } from "@/components/status";
+import { AccessCell, CertCell, ServiceIcon, serviceState, StateLabel } from "@/components/status";
 import { api, type Device, type ProxyHost, type TraefikStatus } from "@/lib/api";
-import { targetUrl } from "@/lib/utils";
+import { cn, targetUrl } from "@/lib/utils";
 
 function Stat({ icon: Icon, label, value, hint }: { icon: typeof Globe; label: string; value: React.ReactNode; hint: string }) {
   return (
@@ -62,7 +63,9 @@ export function HostsPage(props: {
     [...h.domains, h.deviceName, h.targetIp, String(h.targetPort)].join(" ").toLowerCase().includes(query.toLowerCase()),
   );
   const enabledCount = hosts?.filter((h) => h.enabled).length ?? 0;
-  const liveCount = hosts?.filter((h) => h.enabled && traefik?.routers[h.id]?.status === "enabled").length ?? 0;
+  const states = (hosts ?? []).map((h) => serviceState(h, traefik).label);
+  const liveCount = states.filter((l) => l === "Live").length;
+  const downCount = states.filter((l) => l === "Backend down").length;
   const onlineCount = devices.filter((d) => d.online).length;
 
   const toggle = async (h: ProxyHost, enabled: boolean) => {
@@ -101,11 +104,17 @@ export function HostsPage(props: {
           icon={Activity}
           label="Live routes"
           value={traefik?.reachable ? liveCount : "–"}
-          hint={traefik?.reachable ? `Traefik ${traefik.version ?? ""}` : "Traefik unreachable"}
+          hint={
+            !traefik?.reachable
+              ? "Traefik unreachable"
+              : downCount
+                ? `${downCount} ${downCount === 1 ? "backend" : "backends"} down`
+                : `Traefik ${traefik.version ?? ""}`
+          }
         />
         <Stat
           icon={MonitorSmartphone}
-          label="Devices online"
+          label="Peers online"
           value={devices.length ? `${onlineCount}/${devices.length}` : "–"}
           hint="in your tailnet"
         />
@@ -138,7 +147,7 @@ export function HostsPage(props: {
             <div className="space-y-1">
               <p className="font-medium">No services yet</p>
               <p className="max-w-sm text-sm text-muted-foreground">
-                Create one to expose a service on a tailnet device under a public domain.
+                Create one to expose a service on a tailnet peer under a public domain.
               </p>
             </div>
             <Button onClick={props.onNew} className="mt-2">
@@ -149,43 +158,61 @@ export function HostsPage(props: {
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                <TableHead className="pl-4">Domain</TableHead>
-                <TableHead>Target</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Enabled</TableHead>
+                <TableHead className="pl-4">Service</TableHead>
+                <TableHead className="w-[24%]">Target</TableHead>
+                <TableHead className="w-36">HTTPS</TableHead>
+                <TableHead className="w-32">Access</TableHead>
+                <TableHead className="w-20">Enabled</TableHead>
                 <TableHead className="w-12" />
               </TableRow>
             </TableHeader>
             <TableBody>
               {shown.map((h) => {
                 const device = byId.get(h.deviceId);
+                const state = serviceState(h, traefik);
+                const extra = h.domains.length - 1;
                 return (
-                  <TableRow key={h.id} className={h.enabled ? "" : "opacity-60"}>
+                  <TableRow key={h.id}>
                     <TableCell className="py-3 pl-4">
                       <div className="flex items-center gap-3">
-                        <div className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-primary/10 text-primary">
-                          <Globe className="size-4" />
-                        </div>
-                        <div className="min-w-0">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div>
+                              <ServiceIcon host={h} state={state} />
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-sm">{state.detail}</TooltipContent>
+                        </Tooltip>
+                        <div className="min-w-0 leading-tight">
                           <a
                             href={`https://${h.domains[0]}`}
                             target="_blank"
                             rel="noreferrer"
-                            className="group inline-flex items-center gap-1.5 font-medium hover:underline"
+                            className={cn(
+                              "group inline-flex max-w-full items-center gap-1.5 font-medium hover:underline",
+                              !h.enabled && "text-muted-foreground",
+                            )}
                           >
-                            {h.domains[0]}
-                            <ExternalLink className="size-3 opacity-0 transition-opacity group-hover:opacity-60" />
+                            <span className="truncate">{h.domains[0]}</span>
+                            <ExternalLink className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-60" />
                           </a>
-                          {h.domains.length > 1 && (
-                            <p className="truncate text-xs text-muted-foreground" title={h.domains.slice(1).join(", ")}>
-                              + {h.domains.slice(1).join(", ")}
+                          {/* Healthy services let the green tile speak; anything else names the problem. */}
+                          {(state.tone !== "success" || extra > 0) && (
+                            <p className="mt-0.5 truncate text-xs">
+                              {state.tone !== "success" && <StateLabel state={state} />}
+                              {state.tone !== "success" && extra > 0 && <span className="text-muted-foreground"> · </span>}
+                              {extra > 0 && (
+                                <span className="text-muted-foreground" title={h.domains.slice(1).join(", ")}>
+                                  +{extra} {extra === 1 ? "hostname" : "hostnames"}
+                                </span>
+                              )}
                             </p>
                           )}
                         </div>
                       </div>
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center gap-1.5">
+                      <div className={cn("flex items-center gap-1.5", !h.enabled && "opacity-60")}>
                         <DeviceBadge device={device} name={h.deviceName} ip={h.targetIp} />
                         <code className="font-mono text-xs text-muted-foreground">:{h.targetPort}</code>
                         {h.scheme === "https" && (
@@ -194,10 +221,10 @@ export function HostsPage(props: {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <RouterBadge host={h} traefik={traefik} />
-                        <CertBadge host={h} traefik={traefik} />
-                      </div>
+                      <CertCell host={h} traefik={traefik} />
+                    </TableCell>
+                    <TableCell>
+                      <AccessCell host={h} />
                     </TableCell>
                     <TableCell>
                       <Switch checked={h.enabled} onCheckedChange={(v) => toggle(h, v)} aria-label="Enabled" />
@@ -233,7 +260,7 @@ export function HostsPage(props: {
               })}
               {shown.length === 0 && (
                 <TableRow className="hover:bg-transparent">
-                  <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
+                  <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
                     No services match “{query}”.
                   </TableCell>
                 </TableRow>

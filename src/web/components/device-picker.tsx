@@ -17,6 +17,8 @@ import { cn } from "@/lib/utils";
 
 export function DevicePicker(props: {
   devices: Device[];
+  /** The backend tag, for the empty state. */
+  tag: string;
   value: string;
   onChange: (id: string) => void;
   /** Shown when the selected device isn't in the (possibly unavailable) device list. */
@@ -53,7 +55,7 @@ export function DevicePicker(props: {
               <span className="truncate">{props.fallbackLabel}</span>
             </span>
           ) : (
-            <span className="text-muted-foreground">Select a device…</span>
+            <span className="text-muted-foreground">Select a peer…</span>
           )}
           <ChevronsUpDown className="opacity-50" />
         </Button>
@@ -62,7 +64,9 @@ export function DevicePicker(props: {
         <Command>
           <CommandInput placeholder="Search by name, IP, OS or tag…" />
           <CommandList>
-            <CommandEmpty>No devices found.</CommandEmpty>
+            <CommandEmpty>
+              {usable.length ? "No peers found." : `No peers tagged ${props.tag}.`}
+            </CommandEmpty>
             {groups.map((g) => (
               <CommandGroup key={g.heading} heading={g.heading}>
                 {g.items.map((d) => (

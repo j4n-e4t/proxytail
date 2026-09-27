@@ -1,27 +1,31 @@
 # Production stack: proxytail + Traefik joined to your tailnet through a Tailscale sidecar.
-#   cp .env.example .env   # set TS_AUTHKEY + Tailscale API credentials
+#   cp .env.example .env   # set TS_AUTHKEY
 #   docker compose up -d   # pulls ghcr.io/j4n-e4t/proxytail (or `--build` to build locally)
 name: proxytail
 
 services:
-  # Named "app" rather than "proxytail": inside Traefik's (shared) network namespace the Tailscale
-  # container's own hostname would shadow a service called "proxytail".
   app:
     image: ${PROXYTAIL_IMAGE:-ghcr.io/j4n-e4t/proxytail:latest}
     build: .
     restart: unless-stopped
+    # Shares the sidecar's network namespace and only listens on loopback: the sidecar's `tailscale serve` publishes
+    # it on the tailnet at https://<TS_HOSTNAME>.<tailnet>.ts.net, and Traefik polls it directly.
+    network_mode: service:tailscale
+    depends_on:
+      tailscale:
+        condition: service_started
     environment:
-      TRAEFIK_API_URL: http://tailscale:8080
-      TS_API_KEY: ${TS_API_KEY:-}
-      TS_OAUTH_CLIENT_ID: ${TS_OAUTH_CLIENT_ID:-}
-      TS_OAUTH_CLIENT_SECRET: ${TS_OAUTH_CLIENT_SECRET:-}
-      TS_TAILNET: ${TS_TAILNET:--}
+      HOST: 127.0.0.1
+      TRAEFIK_API_URL: http://127.0.0.1:8080
+      TRAEFIK_TLS_ADDR: 127.0.0.1:8443
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+      TS_BACKEND_TAG: ${TS_BACKEND_TAG:-}
+      TS_APP_CAPABILITY: ${TS_APP_CAPABILITY:-}
       PUBLIC_ADDRESS: ${PUBLIC_ADDRESS:-}
+      UI_HOSTS: ${UI_HOSTS:-}
     volumes:
       - proxytail-data:/data
-    ports:
-      # The UI has no authentication yet — only bind it to localhost (or a private interface).
-      - "${UI_BIND:-127.0.0.1}:${UI_PORT:-3000}:3000"
+      - tailscale-socket:/var/run/tailscale
 
   tailscale:
     image: tailscale/tailscale:latest
@@ -31,19 +35,29 @@ services:
       # Only needed for the first start; the node identity is kept in the tailscale-state volume.
       TS_AUTHKEY: ${TS_AUTHKEY:-}
       TS_STATE_DIR: /var/lib/tailscale
+      # LocalAPI socket, shared with proxytail. Also the tailscale CLI's default path.
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+      # Serves proxytail's UI on the tailnet with a *.ts.net certificate (needs HTTPS enabled for the tailnet).
+      TS_SERVE_CONFIG: /config/serve.json
       TS_USERSPACE: "false"
       TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
     volumes:
       - tailscale-state:/var/lib/tailscale
+      - tailscale-socket:/var/run/tailscale
+    configs:
+      - source: tailscale-serve
+        target: /config/serve.json
     devices:
       - /dev/net/tun:/dev/net/tun
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    # Traefik shares this container's network namespace, so its public ports are published here.
+    # Traefik and proxytail share this container's network namespace, so Traefik's public ports are published here.
+    # proxytail's UI is not published: it's only reachable through `tailscale serve`.
     ports:
       - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
+      # Traefik's websecure entrypoint listens on 8443: tailscaled binds 443 on the tailnet IP for `tailscale serve`.
+      - "${HTTPS_PORT:-443}:8443"
 
   traefik:
     image: traefik:v3.5
@@ -59,10 +73,11 @@ services:
     command:
       - --entrypoints.web.address=:80
       # All HTTP traffic is redirected to HTTPS (ACME HTTP-01 challenges on :80 are still answered first).
-      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      # A port rather than "websecure", so the redirect targets the published port instead of 8443.
+      - --entrypoints.web.http.redirections.entrypoint.to=:${HTTPS_PORT:-443}
       - --entrypoints.web.http.redirections.entrypoint.scheme=https
       - --entrypoints.web.http.redirections.entrypoint.permanent=true
-      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.address=:8443
       # Let's Encrypt via the HTTP-01 challenge: every service gets a certificate automatically.
       - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
       - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
@@ -71,7 +86,8 @@ services:
       - --certificatesresolvers.letsencrypt.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}
       # Internal API (port 8080, not published) — proxytail reads router status from it.
       - --api.insecure=true
-      - --providers.http.endpoint=http://app:3000/api/traefik/config
+      # Loopback: proxytail only serves its config without authentication to local connections.
+      - --providers.http.endpoint=http://127.0.0.1:3000/api/traefik/config
       - --providers.http.pollInterval=5s
       - --log.level=INFO
       - --accesslog=true
@@ -79,4 +95,17 @@ services:
 volumes:
   proxytail-data:
   tailscale-state:
+  tailscale-socket:
   traefik-acme:
+
+configs:
+  # Tailnet HTTPS on 443 → proxytail. tailscaled only listens on the node's tailnet IPs, so public traffic still
+  # reaches Traefik (on 8443, see above). `$$` escapes compose interpolation: containerboot fills in the node's ts.net name.
+  tailscale-serve:
+    content: |
+      {
+        "TCP": { "443": { "HTTPS": true } },
+        "Web": {
+          "$${TS_CERT_DOMAIN}:443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:3000" } } }
+        }
+      }

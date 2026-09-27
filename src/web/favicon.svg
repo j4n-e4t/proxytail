@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- The sidebar brand mark: lucide's "waypoints" on the primary color (oklch(0.42 0.15 262)). -->
+  <rect width="32" height="32" rx="8" fill="#1a469d" />
+  <g transform="translate(5 5) scale(0.9167)" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m10.586 5.414-5.172 5.172" />
+    <path d="m18.586 13.414-5.172 5.172" />
+    <path d="M6 12h12" />
+    <circle cx="12" cy="20" r="2" />
+    <circle cx="12" cy="4" r="2" />
+    <circle cx="20" cy="12" r="2" />
+    <circle cx="4" cy="12" r="2" />
+  </g>
+</svg>

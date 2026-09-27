@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader } from "@/components/page-header";
 import { ToneBadge } from "@/components/status";
 import { api, type Settings, type TraefikStatus } from "@/lib/api";
@@ -21,34 +20,6 @@ function Field(props: { id: string; label: string; hint?: React.ReactNode; child
   );
 }
 
-function SecretInput(props: {
-  id: string;
-  value: string;
-  onChange: (v: string) => void;
-  saved: boolean;
-  placeholder: string;
-  onClear: () => void;
-}) {
-  return (
-    <div className="flex gap-2">
-      <Input
-        id={props.id}
-        type="password"
-        autoComplete="off"
-        value={props.value}
-        onChange={(e) => props.onChange(e.target.value)}
-        placeholder={props.saved ? "•••••••••••••••• (saved)" : props.placeholder}
-        className="font-mono"
-      />
-      {props.saved && (
-        <Button type="button" variant="outline" onClick={props.onClear}>
-          Clear
-        </Button>
-      )}
-    </div>
-  );
-}
-
 export function SettingsPage({
   settings,
   traefik,
@@ -58,17 +29,13 @@ export function SettingsPage({
   traefik: TraefikStatus | null;
   onSaved: (s: Settings) => void;
 }) {
-  const [tailnet, setTailnet] = useState(settings.tailnet === "-" ? "" : settings.tailnet);
-  const [apiKey, setApiKey] = useState("");
-  const [clientId, setClientId] = useState(settings.oauthClientId);
-  const [clientSecret, setClientSecret] = useState("");
-  const [method, setMethod] = useState(settings.oauthClientId ? "oauth" : "token");
+  const [tag, setTag] = useState(settings.backendTag);
   const [busy, setBusy] = useState<"save" | "test" | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const test = async () => {
+  const test = async (backendTag = settings.backendTag) => {
     const t = await api.testSettings();
-    toast.success("Connected to Tailscale", { description: `Found ${t.devices} devices in your tailnet.` });
+    toast.success("Connected to Tailscale", { description: `Found ${t.devices} peers tagged ${backendTag}.` });
   };
 
   const run = async (kind: "save" | "test", fn: () => Promise<void>) => {
@@ -87,22 +54,13 @@ export function SettingsPage({
   const save = (e: FormEvent) => {
     e.preventDefault();
     run("save", async () => {
-      const body: Record<string, string | null> = { tailnet: tailnet || null, oauthClientId: clientId || null };
-      if (apiKey) body.apiKey = apiKey;
-      if (clientSecret) body.oauthClientSecret = clientSecret;
-      onSaved(await api.saveSettings(body));
-      setApiKey("");
-      setClientSecret("");
+      const saved = await api.saveSettings({ backendTag: tag || null });
+      onSaved(saved);
+      setTag(saved.backendTag);
       toast.success("Settings saved");
-      await test();
+      await test(saved.backendTag);
     });
   };
-
-  const clear = (key: "apiKey" | "oauthClientSecret") =>
-    run("save", async () => {
-      onSaved(await api.saveSettings({ [key]: null }));
-      toast.success("Credential cleared");
-    });
 
   const [publicAddr, setPublicAddr] = useState(settings.publicAddress);
   const [addrBusy, setAddrBusy] = useState<"save" | "detect" | null>(null);
@@ -131,18 +89,19 @@ export function SettingsPage({
     }
   };
 
-  const endpoint = `${location.origin}/api/traefik/config`.replace(
-    /\/\/(localhost|127\.0\.0\.1)/,
-    "//host.docker.internal",
-  );
+  // Traefik has to poll from loopback (it shares the sidecar's network namespace), or from the host in development.
+  const endpoint = /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
+    ? `${location.origin}/api/traefik/config`.replace(/\/\/(localhost|127\.0\.0\.1)/, "//host.docker.internal")
+    : "http://127.0.0.1:3000/api/traefik/config";
   const providerSnippet = `providers:\n  http:\n    endpoint: "${endpoint}"\n    pollInterval: "5s"`;
 
   return (
-    <div className="max-w-3xl">
+    <div className="max-w-3xl xl:max-w-none">
       <PageHeader title="Settings" description="Connect proxytail to your tailnet and Traefik." />
 
-      <form onSubmit={savePublicAddress}>
-        <Card className="mb-6">
+      <div className="grid gap-6 xl:grid-cols-2 xl:items-start">
+      <form onSubmit={savePublicAddress} className="xl:col-start-1 xl:row-start-1">
+        <Card>
           <CardHeader>
             <CardTitle>Public address</CardTitle>
             <CardDescription>
@@ -186,88 +145,65 @@ export function SettingsPage({
         </Card>
       </form>
 
-      <form onSubmit={save}>
-        <Card className="mb-6">
+      {/* Wide screens: the Tailscale card fills the right column next to the two shorter cards. */}
+      <form onSubmit={save} className="xl:col-start-2 xl:row-span-2 xl:row-start-1">
+        <Card>
           <CardHeader>
-            <CardTitle>Tailscale API</CardTitle>
-            <CardDescription>Used to list devices and resolve their Tailscale IPs.</CardDescription>
+            <CardTitle>Tailscale</CardTitle>
+            <CardDescription>
+              Peers are read from the tailscaled sidecar, which lists every peer the tailnet policy lets proxytail reach.
+            </CardDescription>
             <CardAction>
-              {settings.mock ? (
-                <ToneBadge t="warning">Mock devices</ToneBadge>
-              ) : settings.configured ? (
+              {settings.source === "mock" ? (
+                <ToneBadge t="warning">Mock peers</ToneBadge>
+              ) : settings.source ? (
                 <ToneBadge t="success">
-                  <span className="size-1.5 rounded-full bg-current" /> Configured
+                  <span className="size-1.5 rounded-full bg-current" /> Connected
                 </ToneBadge>
               ) : (
-                <ToneBadge t="muted">Not configured</ToneBadge>
+                <ToneBadge t="muted">Not connected</ToneBadge>
               )}
             </CardAction>
           </CardHeader>
-          <CardContent className="space-y-6">
+          <CardContent className="grid gap-4">
             {settings.mock && (
               <Alert>
                 <AlertDescription>
-                  Devices are loaded from <code className="font-mono">TS_MOCK_DEVICES</code>; credentials below are
-                  ignored.
+                  <p>
+                    Peers are loaded from <code className="font-mono">TS_MOCK_DEVICES</code> instead of tailscaled.
+                  </p>
                 </AlertDescription>
               </Alert>
             )}
-            <Field id="tailnet" label="Tailnet" hint="Leave empty to use the default tailnet of the credentials.">
-              <Input id="tailnet" value={tailnet} onChange={(e) => setTailnet(e.target.value)} placeholder="example.com" />
+            {!settings.source && (
+              <Alert>
+                <AlertDescription>
+                  <p>
+                    tailscaled's socket isn't available. Share it with proxytail (<code className="font-mono">TS_SOCKET</code>
+                    , see <code className="font-mono">docker-compose.yml</code>).
+                  </p>
+                </AlertDescription>
+              </Alert>
+            )}
+            <Field
+              id="backend-tag"
+              label="Peer tag"
+              hint={
+                <>
+                  Only peers with this tag are listed and can be targeted. Define it under{" "}
+                  <code className="font-mono">tagOwners</code> in your tailnet policy.
+                </>
+              }
+            >
+              <Input
+                id="backend-tag"
+                value={tag}
+                onChange={(e) => setTag(e.target.value)}
+                placeholder="tag:proxytail-backend"
+                autoComplete="off"
+                className="font-mono"
+              />
             </Field>
-
-            <Tabs value={method} onValueChange={setMethod}>
-              <TabsList className="mb-2">
-                <TabsTrigger value="token">API access token</TabsTrigger>
-                <TabsTrigger value="oauth">OAuth client</TabsTrigger>
-              </TabsList>
-              <TabsContent value="token">
-                <Field
-                  id="api-key"
-                  label="Access token"
-                  hint="Admin console → Settings → Keys. Tokens expire after at most 90 days."
-                >
-                  <SecretInput
-                    id="api-key"
-                    value={apiKey}
-                    onChange={setApiKey}
-                    saved={settings.apiKeySet}
-                    placeholder="tskey-api-…"
-                    onClear={() => clear("apiKey")}
-                  />
-                </Field>
-              </TabsContent>
-              <TabsContent value="oauth" className="grid gap-4">
-                <Field id="client-id" label="Client ID">
-                  <Input
-                    id="client-id"
-                    value={clientId}
-                    onChange={(e) => setClientId(e.target.value)}
-                    autoComplete="off"
-                    className="font-mono"
-                  />
-                </Field>
-                <Field
-                  id="client-secret"
-                  label="Client secret"
-                  hint={
-                    <>
-                      Needs the <code className="font-mono">devices:core:read</code> scope. Doesn't expire; takes
-                      precedence over an access token.
-                    </>
-                  }
-                >
-                  <SecretInput
-                    id="client-secret"
-                    value={clientSecret}
-                    onChange={setClientSecret}
-                    saved={settings.oauthClientSecretSet}
-                    placeholder="tskey-client-…"
-                    onClear={() => clear("oauthClientSecret")}
-                  />
-                </Field>
-              </TabsContent>
-            </Tabs>
           </CardContent>
           <CardFooter className="justify-between gap-2 border-t">
             <p className="text-xs text-muted-foreground">Values saved here override environment variables.</p>
@@ -276,7 +212,7 @@ export function SettingsPage({
                 type="button"
                 variant="outline"
                 disabled={!!busy || !settings.configured}
-                onClick={() => run("test", test)}
+                onClick={() => run("test", () => test())}
               >
                 {busy === "test" ? <Loader2 className="animate-spin" /> : <Plug />} Test connection
               </Button>
@@ -288,7 +224,7 @@ export function SettingsPage({
         </Card>
       </form>
 
-      <Card>
+      <Card className="xl:col-start-1 xl:row-start-2">
         <CardHeader>
           <CardTitle>Traefik</CardTitle>
           <CardDescription>
@@ -337,6 +273,7 @@ export function SettingsPage({
           </Button>
         </CardFooter>
       </Card>
+      </div>
     </div>
   );
 }

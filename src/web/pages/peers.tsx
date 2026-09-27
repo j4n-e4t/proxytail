@@ -17,8 +17,11 @@ import { cn, timeAgo } from "@/lib/utils";
 
 type Filter = "all" | "online" | "offline";
 
-export function DevicesPage(props: {
+
+
+export function PeersPage(props: {
   devices: Device[] | null;
+  tag: string;
   error: string | null;
   configured: boolean;
   hosts: ProxyHost[];
@@ -37,6 +40,8 @@ export function DevicesPage(props: {
   }, [props.hosts]);
 
   const all = props.devices ?? [];
+  const tag = <code className="font-mono">{props.tag}</code>;
+  const description = <>Tailnet peers tagged {tag} that proxytail can reach.</>;
   const shown = all.filter(
     (d) =>
       (filter === "all" || (filter === "online") === d.online) &&
@@ -47,7 +52,7 @@ export function DevicesPage(props: {
     setRefreshing(true);
     try {
       await props.onRefresh();
-      toast.success("Device list refreshed");
+      toast.success("Peer list refreshed");
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -58,7 +63,7 @@ export function DevicesPage(props: {
   if (!props.configured) {
     return (
       <>
-        <PageHeader title="Devices" description="Nodes in your tailnet, from the Tailscale API." />
+        <PageHeader title="Peers" description={description} />
         <Card className="items-center gap-3 px-6 py-16 text-center">
           <div className="flex size-12 items-center justify-center rounded-full border bg-muted">
             <KeyRound className="size-5 text-muted-foreground" />
@@ -66,7 +71,7 @@ export function DevicesPage(props: {
           <div className="space-y-1">
             <p className="font-medium">Connect your tailnet</p>
             <p className="max-w-sm text-sm text-muted-foreground">
-              Add a Tailscale API token or OAuth client to list the devices you can route to.
+              Share tailscaled's socket with proxytail to list the peers you can route to.
             </p>
           </div>
           <Button onClick={props.onOpenSettings} className="mt-2">
@@ -79,7 +84,7 @@ export function DevicesPage(props: {
 
   return (
     <>
-      <PageHeader title="Devices" description="Nodes in your tailnet, from the Tailscale API.">
+      <PageHeader title="Peers" description={description}>
         <Button variant="outline" onClick={refresh} disabled={refreshing}>
           <RefreshCw className={cn(refreshing && "animate-spin")} /> Refresh
         </Button>
@@ -87,7 +92,7 @@ export function DevicesPage(props: {
 
       {props.error && (
         <Alert variant="destructive" className="mb-4">
-          <AlertTitle>Couldn't reach the Tailscale API</AlertTitle>
+          <AlertTitle>Couldn't list peers</AlertTitle>
           <AlertDescription>{props.error}</AlertDescription>
         </Alert>
       )}
@@ -99,7 +104,7 @@ export function DevicesPage(props: {
             <Input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search devices…"
+              placeholder="Search peers…"
               className="h-8 pl-8"
             />
           </div>
@@ -128,7 +133,7 @@ export function DevicesPage(props: {
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                <TableHead className="pl-4">Device</TableHead>
+                <TableHead className="pl-4">Peer</TableHead>
                 <TableHead>Tailscale IP</TableHead>
                 <TableHead>Owner / tags</TableHead>
                 <TableHead>Last seen</TableHead>
@@ -173,9 +178,9 @@ export function DevicesPage(props: {
                       )}
                     </TableCell>
                     <TableCell>
-                      {d.tags.length ? (
+                      {d.tags.length > 1 ? (
                         <div className="flex flex-wrap gap-1">
-                          {d.tags.map((t) => (
+                          {d.tags.filter((t) => t !== props.tag).map((t) => (
                             <Badge key={t} variant="secondary" className="font-mono text-[11px]">
                               {t.replace(/^tag:/, "")}
                             </Badge>
@@ -206,7 +211,11 @@ export function DevicesPage(props: {
               {shown.length === 0 && (
                 <TableRow className="hover:bg-transparent">
                   <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
-                    No devices found.
+                    {all.length ? (
+                      "No peers found."
+                    ) : (
+                      <>No peers tagged {tag} yet.</>
+                    )}
                   </TableCell>
                 </TableRow>
               )}
