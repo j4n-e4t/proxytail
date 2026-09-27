@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Globe,
@@ -25,7 +25,7 @@ import { useTheme, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ClientCasPage } from "@/pages/client-cas";
 import { PeersPage } from "@/pages/peers";
-import { ServiceEditorPage } from "@/pages/service-editor";
+import { ServiceEditorDialog } from "@/pages/service-editor";
 import { DomainsPage } from "@/pages/domains";
 import { HostsPage } from "@/pages/hosts";
 import { SettingsPage } from "@/pages/settings";
@@ -51,9 +51,11 @@ function useRoute() {
   };
   const [route, setRoute] = useState<Route>(read);
   useEffect(() => {
-    const onHash = () => {
-      setRoute(read());
-      scrollTo(0, 0);
+    const onHash = (e: HashChangeEvent) => {
+      const next = read();
+      // Opening or closing the service editor keeps the list where it was.
+      if (new URL(e.oldURL).hash.slice(1).split(/[/?]/)[0] !== next.page) scrollTo(0, 0);
+      setRoute(next);
     };
     addEventListener("hashchange", onHash);
     return () => removeEventListener("hashchange", onHash);
@@ -170,6 +172,12 @@ function Console() {
 
   const configured = !!settings.data?.configured;
 
+  // `#services/new` and `#services/<id>` open the editor over the list. The last one stays rendered while it closes.
+  const editorOpen = page === "services" && !!route.sub;
+  const lastEditor = useRef({ sub: "new", params: new URLSearchParams() });
+  if (editorOpen) lastEditor.current = { sub: route.sub!, params: route.params };
+  const editor = lastEditor.current;
+
   return (
     <div className="flex min-h-screen">
       <aside className="sticky top-0 flex h-screen w-60 shrink-0 flex-col border-r bg-sidebar">
@@ -264,7 +272,7 @@ function Console() {
 
       <main className="min-w-0 flex-1">
         <div className="max-w-screen-2xl px-6 py-8 lg:px-10">
-          {page === "services" && !route.sub && (
+          {page === "services" && (
             <HostsPage
               hosts={hosts.data}
               devices={devices.data ?? []}
@@ -272,26 +280,6 @@ function Console() {
               onNew={() => navigate("services/new")}
               onEdit={(h) => navigate(`services/${h.id}`)}
               onChanged={refreshHosts}
-            />
-          )}
-          {page === "services" && route.sub && (
-            <ServiceEditorPage
-              key={route.sub}
-              hostId={route.sub === "new" ? null : Number(route.sub)}
-              initialDeviceId={route.params.get("peer") ?? undefined}
-              hosts={hosts.data}
-              devices={devices.data ?? []}
-              peerTag={settings.data?.backendTag ?? ""}
-              domains={domains.data}
-              clientCas={clientCas.data}
-              traefik={traefik.data}
-              onOpenDomains={() => setPage("domains")}
-              onOpenClientCas={() => setPage("client-cas")}
-              onCancel={() => setPage("services")}
-              onSaved={() => {
-                refreshHosts();
-                setPage("services");
-              }}
             />
           )}
           {page === "domains" && (
@@ -338,6 +326,25 @@ function Console() {
           )}
         </div>
       </main>
+
+      <ServiceEditorDialog
+        open={editorOpen}
+        hostId={editor.sub === "new" ? null : Number(editor.sub)}
+        initialDeviceId={editor.params.get("peer") ?? undefined}
+        hosts={hosts.data}
+        devices={devices.data ?? []}
+        peerTag={settings.data?.backendTag ?? ""}
+        domains={domains.data}
+        clientCas={clientCas.data}
+        traefik={traefik.data}
+        onOpenDomains={() => setPage("domains")}
+        onOpenClientCas={() => setPage("client-cas")}
+        onCancel={() => setPage("services")}
+        onSaved={() => {
+          refreshHosts();
+          setPage("services");
+        }}
+      />
     </div>
   );
 }

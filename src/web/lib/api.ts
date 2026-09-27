@@ -12,8 +12,6 @@ export interface ProxyHost {
   enabled: boolean;
   basicAuth: boolean;
   basicAuthUsers: { username: string }[];
-  healthCheck: boolean;
-  healthCheckPath: string;
   clientAuth: ClientAuth;
   clientCaIds: number[];
   clientCertHeaders: boolean;
@@ -30,8 +28,6 @@ export type ProxyHostDraft = Pick<
   | "insecureSkipVerify"
   | "enabled"
   | "basicAuth"
-  | "healthCheck"
-  | "healthCheckPath"
   | "clientAuth"
   | "clientCaIds"
   | "clientCertHeaders"
@@ -119,8 +115,6 @@ export interface TraefikStatus {
   error?: string;
   routers: Record<number, { status: string; errors?: string[] }>;
   certificates: Record<number, CertInfo>;
-  /** Only present for services with a health check. */
-  health: Record<number, { up: boolean; url: string }>;
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {

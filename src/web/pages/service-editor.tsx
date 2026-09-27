@@ -1,32 +1,18 @@
 import { useState, type FormEvent } from "react";
-import {
-  ArrowLeft,
-  ArrowRight,
-  Globe,
-  KeyRound,
-  Loader2,
-  Plus,
-  Server,
-  ShieldCheck,
-  Trash2,
-  X,
-  type LucideIcon,
-} from "lucide-react";
+import { ArrowRight, Globe, KeyRound, Loader2, Plus, ShieldCheck, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { TraefikIcon } from "@/components/brand-icons";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DeviceBadge } from "@/components/device-badge";
 import { DevicePicker } from "@/components/device-picker";
-import { OsIcon } from "@/components/os-icon";
-import { PageHeader } from "@/components/page-header";
 import { serviceState, StateTile } from "@/components/status";
 import {
   api,
@@ -38,7 +24,6 @@ import {
   type ProxyHostDraft,
   type TraefikStatus,
 } from "@/lib/api";
-import { cn } from "@/lib/utils";
 
 interface EditorProps {
   devices: Device[];
@@ -52,46 +37,62 @@ interface EditorProps {
   onSaved: () => void;
 }
 
-/** Create (`hostId` null) or edit a service. `hosts` and `domains` are `null` while still loading. */
-export function ServiceEditorPage(
-  props: EditorProps & { hosts: ProxyHost[] | null; hostId: number | null; initialDeviceId?: string },
+/** Create (`hostId` null) or edit a service in a modal. `hosts` and `domains` are `null` while still loading. */
+export function ServiceEditorDialog(
+  props: EditorProps & { open: boolean; hosts: ProxyHost[] | null; hostId: number | null; initialDeviceId?: string },
 ) {
-  if (props.domains === null || props.clientCas === null || (props.hostId !== null && props.hosts === null)) {
-    return (
-      <div className="max-w-3xl space-y-4">
-        <Skeleton className="h-10 w-64" />
-        <Skeleton className="h-48 w-full" />
-        <Skeleton className="h-48 w-full" />
-      </div>
-    );
-  }
+  const loading = props.domains === null || props.clientCas === null || (props.hostId !== null && props.hosts === null);
   const existing = props.hostId !== null ? props.hosts?.find((h) => h.id === props.hostId) : undefined;
-  if (props.hostId !== null && !existing) {
-    return (
-      <div className="max-w-3xl">
-        <BackLink onClick={props.onCancel} />
-        <PageHeader title="Service not found" description={`There is no service with id ${props.hostId}.`} />
-      </div>
-    );
-  }
   return (
-    // Keyed so the form state resets when switching between services.
-    <ServiceForm
-      key={existing?.id ?? "new"}
-      {...props}
-      domains={props.domains}
-      clientCas={props.clientCas}
-      existing={existing ?? null}
-      initialDeviceId={props.initialDeviceId}
-    />
+    <Dialog open={props.open} onOpenChange={(open) => !open && props.onCancel()}>
+      <DialogContent className="flex max-h-[calc(100vh-4rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
+        {loading ? (
+          <div className="space-y-4 p-6">
+            <DialogTitle className="sr-only">Loading service</DialogTitle>
+            <Skeleton className="h-6 w-48" />
+            <Skeleton className="h-32 w-full" />
+            <Skeleton className="h-32 w-full" />
+          </div>
+        ) : props.hostId !== null && !existing ? (
+          <DialogHeader className="p-6">
+            <DialogTitle>Service not found</DialogTitle>
+            <DialogDescription>There is no service with id {props.hostId}.</DialogDescription>
+          </DialogHeader>
+        ) : (
+          // Keyed so the form state resets when switching between services.
+          <ServiceForm
+            key={existing?.id ?? "new"}
+            {...props}
+            domains={props.domains!}
+            clientCas={props.clientCas!}
+            existing={existing ?? null}
+          />
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 
-function BackLink({ onClick }: { onClick: () => void }) {
+type Tab = "domains" | "target" | "auth" | "advanced";
+
+/** A titled block of the form, optionally switched on and off from its header. */
+function Section(props: {
+  title: string;
+  description: React.ReactNode;
+  action?: React.ReactNode;
+  children?: React.ReactNode;
+}) {
   return (
-    <Button variant="link" className="mb-2 h-auto px-0 text-muted-foreground" onClick={onClick}>
-      <ArrowLeft /> Services
-    </Button>
+    <section className="space-y-3 border-t pt-5 first:border-t-0 first:pt-0">
+      <div className="flex items-start justify-between gap-6">
+        <div className="space-y-1">
+          <h3 className="text-sm font-semibold">{props.title}</h3>
+          <p className="text-sm text-muted-foreground">{props.description}</p>
+        </div>
+        {props.action}
+      </div>
+      {props.children}
+    </section>
   );
 }
 
@@ -137,8 +138,6 @@ function ServiceForm(
   const [skipVerify, setSkipVerify] = useState(existing?.insecureSkipVerify ?? false);
   const [enabled, setEnabled] = useState(existing?.enabled ?? true);
   const [basicAuth, setBasicAuth] = useState(existing?.basicAuth ?? false);
-  const [healthCheck, setHealthCheck] = useState(existing?.healthCheck ?? true);
-  const [healthPath, setHealthPath] = useState(existing?.healthCheckPath ?? "/");
   const [users, setUsers] = useState<UserRow[]>(
     () => existing?.basicAuthUsers.map((u) => ({ key: nextKey++, username: u.username, password: "", previous: u.username })) ?? [],
   );
@@ -152,6 +151,7 @@ function ServiceForm(
         : [],
   );
   const [certHeaders, setCertHeaders] = useState(existing?.clientCertHeaders ?? false);
+  const [tab, setTab] = useState<Tab>("domains");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -176,9 +176,16 @@ function ServiceForm(
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (!deviceId) return setError("Pick the tailnet peer that runs this service.");
-    if (rows.some((r) => !r.base)) return setError("Pick a domain for every hostname.");
-    if (clientAuth !== "off" && !caIds.length) return setError("Pick a CA to verify client certificates against.");
+    // Point at the tab that needs fixing: its fields aren't visible from the others.
+    const invalid = (t: Tab, message: string) => {
+      setTab(t);
+      setError(message);
+    };
+    if (rows.some((r) => !r.base)) return invalid("domains", "Pick a domain for every hostname.");
+    if (!deviceId) return invalid("target", "Pick the tailnet peer that runs this service.");
+    if (!port) return invalid("target", "Enter the port your service is listening on.");
+    if (clientAuth !== "off" && !caIds.length)
+      return invalid("auth", "Pick a CA to verify client certificates against.");
     const draft: ProxyHostDraft = {
       domains: rows.map(joinHostname),
       deviceId,
@@ -187,8 +194,6 @@ function ServiceForm(
       insecureSkipVerify: scheme === "https" && skipVerify,
       enabled,
       basicAuth,
-      healthCheck,
-      healthCheckPath: healthPath.trim() || "/",
       clientAuth,
       clientCaIds: clientAuth === "off" ? [] : caIds,
       clientCertHeaders: clientAuth !== "off" && certHeaders,
@@ -211,456 +216,347 @@ function ServiceForm(
     }
   };
 
+  const state = existing ? serviceState(existing, props.traefik) : null;
+
   return (
-    <form onSubmit={submit}>
-      <BackLink onClick={props.onCancel} />
-      <PageHeader
-        title={existing ? existing.domains[0]! : "New service"}
-        description={
-          existing ? (
-            <>
-              Traefik router <code className="font-mono">proxytail-host-{existing.id}@http</code>
-            </>
-          ) : (
-            "Expose a service on your tailnet through Traefik."
-          )
-        }
-      />
-
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_20rem] xl:items-start 2xl:grid-cols-[minmax(0,52rem)_24rem]">
-      <div className="min-w-0 space-y-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Domains</CardTitle>
-            <CardDescription>Choose a subdomain on one of your verified domains.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {baseOptions.length === 0 ? (
-              <div className="flex items-center justify-between gap-4 rounded-lg border border-dashed p-4">
-                <p className="text-sm text-muted-foreground">
-                  {pending.length
-                    ? `${pending.map((d) => d.name).join(", ")} ${pending.length > 1 ? "are" : "is"} still waiting for DNS verification.`
-                    : "You haven't added a domain yet."}
-                </p>
-                <Button type="button" variant="outline" size="sm" onClick={props.onOpenDomains}>
-                  <Globe /> Manage domains
-                </Button>
-              </div>
+    <form onSubmit={submit} className="flex min-h-0 flex-col">
+      <Tabs value={tab} onValueChange={(v) => setTab(v as Tab)} className="min-h-0 flex-1 gap-0">
+        <DialogHeader className="border-b px-6 pt-6 pb-4 pr-12">
+          <DialogTitle className="truncate">{existing ? existing.domains[0] : "New service"}</DialogTitle>
+          <DialogDescription>
+            {existing ? (
+              <>
+                Traefik router <code className="font-mono">proxytail-host-{existing.id}@http</code>
+              </>
             ) : (
-              <div className="space-y-2">
-                {rows.map((r, i) => (
-                  <div key={i} className="flex gap-2">
-                    <div className="flex flex-1">
-                      <Input
-                        autoFocus={i === 0 && !existing}
-                        value={r.sub}
-                        onChange={(e) => setRow(i, { sub: e.target.value.replace(/\s/g, "") })}
-                        placeholder="app"
-                        aria-label="Subdomain"
-                        className="h-10 flex-1 rounded-r-none font-mono focus-visible:z-10"
-                      />
-                      <Select value={r.base} onValueChange={(base) => setRow(i, { base })}>
-                        <SelectTrigger
-                          aria-label="Domain"
-                          className="h-10! max-w-[55%] min-w-40 rounded-l-none border-l-0 bg-muted/40 font-mono"
-                        >
-                          <span className="truncate">{r.base ? `.${r.base}` : "Select domain"}</span>
-                        </SelectTrigger>
-                        <SelectContent align="end">
-                          {baseOptions.map((b) => (
-                            <SelectItem key={b} value={b} className="font-mono">
-                              .{b}
-                              {!verified.some((d) => d.name === b) && (
-                                <span className="font-sans text-xs text-muted-foreground">not verified</span>
-                              )}
-                            </SelectItem>
-                          ))}
-                          {pending.map((d) => (
-                            <SelectItem key={d.name} value={d.name} disabled className="font-mono">
-                              .{d.name}
-                              <span className="font-sans text-xs text-muted-foreground">pending DNS</span>
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    {rows.length > 1 && (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="size-10 text-muted-foreground"
-                        onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}
-                        aria-label="Remove hostname"
-                      >
-                        <X />
-                      </Button>
-                    )}
-                  </div>
-                ))}
-                <p className="text-xs text-muted-foreground">Leave the subdomain empty to use the domain itself.</p>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="h-10 w-full border-dashed bg-transparent text-muted-foreground"
-                  onClick={() => setRows((rs) => [...rs, { sub: "", base: rs.at(-1)?.base ?? defaultBase }])}
-                >
-                  <Plus /> Add hostname
-                </Button>
-              </div>
+              "Expose a service on your tailnet through Traefik."
             )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Target</CardTitle>
-            <CardDescription>The tailnet peer and port your service is listening on.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <DevicePicker
-              devices={props.devices}
-              tag={props.peerTag}
-              value={deviceId}
-              onChange={setDeviceId}
-              fallbackLabel={
-                existing ? `${existing.deviceName} (${existing.targetIp}) — untagged or not in tailnet` : undefined
-              }
-            />
-            <div className="flex gap-2">
-              <Select value={scheme} onValueChange={(v) => setScheme(v as "http" | "https")}>
-                <SelectTrigger className="h-10! w-28">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="http">http://</SelectItem>
-                  <SelectItem value="https">https://</SelectItem>
-                </SelectContent>
-              </Select>
-              <Input
-                type="number"
-                min={1}
-                max={65535}
-                value={port}
-                onChange={(e) => setPort(e.target.value)}
-                placeholder="Port, e.g. 8080"
-                className="h-10 flex-1"
-                required
-              />
-            </div>
-            <div className="flex min-w-0 items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 xl:hidden">
-              <span className="truncate font-mono text-xs">{firstDomain}</span>
-              <ArrowRight className="size-3.5 shrink-0 text-muted-foreground" />
-              {device || existing ? (
-                <DeviceBadge device={device} name={device?.name ?? existing!.deviceName} className="h-6 text-xs" />
-              ) : (
-                <span className="text-xs text-muted-foreground">select a peer</span>
-              )}
-              <span className="font-mono text-xs text-muted-foreground">
-                {scheme === "https" ? "https " : ""}:{port || "port"}
-              </span>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Health check</CardTitle>
-            <CardDescription>
-              Traefik requests this path every 10 seconds. Any 2xx or 3xx answer counts as healthy; otherwise the
-              service is flagged and visitors get a 503 until it recovers.
-            </CardDescription>
-            <CardAction>
-              <Switch checked={healthCheck} onCheckedChange={setHealthCheck} aria-label="Enable health check" />
-            </CardAction>
-          </CardHeader>
-          {healthCheck && (
-            <CardContent>
-              <div className="flex">
-                <span className="flex h-10 max-w-[55%] items-center truncate rounded-l-md border border-r-0 bg-muted/40 px-3 font-mono text-sm text-muted-foreground">
-                  {scheme}://{device?.ipv4 ?? existing?.targetIp ?? "peer"}:{port || "port"}
-                </span>
-                <Input
-                  value={healthPath}
-                  onChange={(e) => setHealthPath(e.target.value.replace(/\s/g, ""))}
-                  placeholder="/"
-                  aria-label="Health check path"
-                  className="h-10 flex-1 rounded-l-none font-mono"
-                />
+          </DialogDescription>
+          {state && (
+            <div className="mt-2 flex items-center gap-3 rounded-lg border bg-muted/30 p-2.5">
+              <StateTile state={state} />
+              <div className="min-w-0 leading-tight">
+                <p className="text-sm font-medium">{state.label}</p>
+                <p className="text-xs whitespace-pre-line text-muted-foreground">{state.detail}</p>
               </div>
-              <p className="mt-2 text-xs text-muted-foreground">
-                Use a path that doesn't require login, e.g. <code className="font-mono">/health</code>, if the root
-                page answers 401 or 404.
-              </p>
-            </CardContent>
+            </div>
           )}
-        </Card>
+          <TabsList className="mt-3 w-full">
+            <TabsTrigger value="domains">Domains</TabsTrigger>
+            <TabsTrigger value="target">Target</TabsTrigger>
+            <TabsTrigger value="auth">
+              Authentication
+              {(basicAuth || clientAuth !== "off") && <span className="size-1.5 rounded-full bg-primary" aria-label="on" />}
+            </TabsTrigger>
+            <TabsTrigger value="advanced">Advanced</TabsTrigger>
+          </TabsList>
+        </DialogHeader>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Basic auth</CardTitle>
-            <CardDescription>
-              Ask visitors for a username and password before Traefik forwards the request. Credentials are stripped
-              before reaching the service.
-            </CardDescription>
-            <CardAction>
-              <Switch checked={basicAuth} onCheckedChange={toggleBasicAuth} aria-label="Require basic auth" />
-            </CardAction>
-          </CardHeader>
-          {basicAuth && (
-            <CardContent className="space-y-2">
-              <div className="grid grid-cols-[1fr_1fr_2.5rem] gap-2 text-xs font-medium text-muted-foreground">
-                <span>Username</span>
-                <span>Password</span>
-              </div>
-              {users.map((u) => (
-                <div key={u.key} className="grid grid-cols-[1fr_1fr_2.5rem] gap-2">
-                  <Input
-                    value={u.username}
-                    onChange={(e) => setUser(u.key, { username: e.target.value.replace(/[\s:]/g, "") })}
-                    placeholder="alice"
-                    aria-label="Username"
-                    autoComplete="off"
-                    className="h-10 font-mono"
-                  />
-                  <Input
-                    type="password"
-                    value={u.password}
-                    onChange={(e) => setUser(u.key, { password: e.target.value })}
-                    placeholder={u.previous ? "•••••••• (unchanged)" : "At least 8 characters"}
-                    aria-label="Password"
-                    autoComplete="new-password"
-                    className="h-10 font-mono"
-                  />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="size-10 text-muted-foreground"
-                    onClick={() => setUsers((us) => us.filter((x) => x.key !== u.key))}
-                    aria-label={`Remove ${u.username || "user"}`}
-                  >
-                    <Trash2 />
-                  </Button>
-                </div>
-              ))}
-              <Button
-                type="button"
-                variant="outline"
-                className="h-10 w-full border-dashed bg-transparent text-muted-foreground"
-                onClick={addUser}
-              >
-                <Plus /> Add user
-              </Button>
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <KeyRound className="size-3" /> Passwords are stored as bcrypt hashes and can't be shown again.
-              </p>
-            </CardContent>
-          )}
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Client certificates</CardTitle>
-            <CardDescription>
-              Mutual TLS: Traefik asks visitors for a certificate signed by one of your CAs during the TLS handshake,
-              before any request reaches the service.
-            </CardDescription>
-            <CardAction>
-              <Switch
-                checked={clientAuth !== "off"}
-                onCheckedChange={(on) => setClientAuth(on ? "require" : "off")}
-                aria-label="Verify client certificates"
-              />
-            </CardAction>
-          </CardHeader>
-          {clientAuth !== "off" && (
-            <CardContent className="space-y-4">
-              {props.clientCas.length === 0 ? (
+        {/* Fixed height so the dialog doesn't jump when switching tabs. */}
+        <div className="h-[26rem] max-h-[60vh] overflow-y-auto px-6 py-5">
+          <TabsContent value="domains" className="space-y-5">
+            <Section title="Domains" description="Choose a subdomain on one of your verified domains.">
+              {baseOptions.length === 0 ? (
                 <div className="flex items-center justify-between gap-4 rounded-lg border border-dashed p-4">
-                  <p className="text-sm text-muted-foreground">You haven't added a client CA yet.</p>
-                  <Button type="button" variant="outline" size="sm" onClick={props.onOpenClientCas}>
-                    <ShieldCheck /> Manage client CAs
+                  <p className="text-sm text-muted-foreground">
+                    {pending.length
+                      ? `${pending.map((d) => d.name).join(", ")} ${pending.length > 1 ? "are" : "is"} still waiting for DNS verification.`
+                      : "You haven't added a domain yet."}
+                  </p>
+                  <Button type="button" variant="outline" size="sm" onClick={props.onOpenDomains}>
+                    <Globe /> Manage domains
                   </Button>
                 </div>
               ) : (
                 <div className="space-y-2">
-                  <Label>Trusted CAs</Label>
-                  <div className="divide-y rounded-lg border">
-                    {props.clientCas.map((ca) => {
-                      const id = `ca-${ca.id}`;
-                      const expired = new Date(ca.summary.notAfter).getTime() < Date.now();
-                      return (
-                        <label key={ca.id} htmlFor={id} className="flex cursor-pointer items-center gap-3 px-3 py-2.5">
-                          <Checkbox
-                            id={id}
-                            checked={caIds.includes(ca.id)}
-                            onCheckedChange={(v) =>
-                              setCaIds((ids) => (v === true ? [...ids, ca.id] : ids.filter((x) => x !== ca.id)))
-                            }
-                          />
-                          <div className="min-w-0 flex-1 leading-tight">
-                            <p className="truncate text-sm font-medium">{ca.name}</p>
-                            <p className="truncate text-xs text-muted-foreground">
-                              CN={ca.summary.subject}
-                            </p>
-                          </div>
-                          {expired && <span className="text-xs text-destructive">Expired</span>}
-                        </label>
-                      );
-                    })}
+                  {rows.map((r, i) => (
+                    <div key={i} className="flex gap-2">
+                      <div className="flex flex-1">
+                        <Input
+                          autoFocus={i === 0 && !existing}
+                          value={r.sub}
+                          onChange={(e) => setRow(i, { sub: e.target.value.replace(/\s/g, "") })}
+                          placeholder="app"
+                          aria-label="Subdomain"
+                          className="flex-1 rounded-r-none font-mono focus-visible:z-10"
+                        />
+                        <Select value={r.base} onValueChange={(base) => setRow(i, { base })}>
+                          <SelectTrigger
+                            aria-label="Domain"
+                            className="max-w-[55%] min-w-40 rounded-l-none border-l-0 bg-muted/40 font-mono"
+                          >
+                            <span className="truncate">{r.base ? `.${r.base}` : "Select domain"}</span>
+                          </SelectTrigger>
+                          <SelectContent align="end">
+                            {baseOptions.map((b) => (
+                              <SelectItem key={b} value={b} className="font-mono">
+                                .{b}
+                                {!verified.some((d) => d.name === b) && (
+                                  <span className="font-sans text-xs text-muted-foreground">not verified</span>
+                                )}
+                              </SelectItem>
+                            ))}
+                            {pending.map((d) => (
+                              <SelectItem key={d.name} value={d.name} disabled className="font-mono">
+                                .{d.name}
+                                <span className="font-sans text-xs text-muted-foreground">pending DNS</span>
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      {rows.length > 1 && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="text-muted-foreground"
+                          onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}
+                          aria-label="Remove hostname"
+                        >
+                          <X />
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-between gap-4">
+                    <p className="text-xs text-muted-foreground">Leave the subdomain empty to use the domain itself.</p>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="text-muted-foreground"
+                      onClick={() => setRows((rs) => [...rs, { sub: "", base: rs.at(-1)?.base ?? defaultBase }])}
+                    >
+                      <Plus /> Add hostname
+                    </Button>
                   </div>
-                  <p className="text-xs text-muted-foreground">
-                    Any certificate signed by a checked CA is accepted.{" "}
-                    <button type="button" className="underline" onClick={props.onOpenClientCas}>
-                      Manage client CAs
-                    </button>
-                  </p>
                 </div>
               )}
-              <div className="grid gap-2">
-                <Label>Visitors without a valid certificate</Label>
-                <Select value={clientAuth} onValueChange={(v) => setClientAuth(v as ClientAuth)}>
-                  <SelectTrigger className="h-10! w-full">
+            </Section>
+          </TabsContent>
+
+          <TabsContent value="target" className="space-y-5">
+            <Section title="Target" description="The tailnet peer and port your service is listening on.">
+              <DevicePicker
+                devices={props.devices}
+                tag={props.peerTag}
+                value={deviceId}
+                onChange={setDeviceId}
+                fallbackLabel={
+                  existing ? `${existing.deviceName} (${existing.targetIp}) — untagged or not in tailnet` : undefined
+                }
+              />
+              <div className="flex gap-2">
+                <Select value={scheme} onValueChange={(v) => setScheme(v as "http" | "https")}>
+                  <SelectTrigger className="w-28">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="require">Are rejected during the handshake</SelectItem>
-                    <SelectItem value="optional">Get through; certificates are verified if presented</SelectItem>
+                    <SelectItem value="http">http://</SelectItem>
+                    <SelectItem value="https">https://</SelectItem>
                   </SelectContent>
                 </Select>
-                {clientAuth === "optional" && (
-                  <p className="text-xs text-muted-foreground">
-                    Useful when the service decides itself, e.g. by forwarding the certificate details below. Invalid
-                    certificates are still rejected.
-                  </p>
-                )}
-              </div>
-              <div className="flex items-start gap-3 border-t pt-4">
-                <Checkbox
-                  id="cert-headers"
-                  checked={certHeaders}
-                  onCheckedChange={(v) => setCertHeaders(v === true)}
-                  className="mt-0.5"
+                <Input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={port}
+                  onChange={(e) => setPort(e.target.value)}
+                  placeholder="Port, e.g. 8080"
+                  className="flex-1"
                 />
-                <div className="space-y-1">
-                  <Label htmlFor="cert-headers">Forward certificate details</Label>
-                  <p className="text-sm text-muted-foreground">
-                    Pass the verified certificate's subject, issuer, serial and validity to the service in the{" "}
-                    <code className="font-mono text-xs">X-Forwarded-Tls-Client-Cert-Info</code> header (URL-encoded).
-                    A value sent by the client is always dropped.
-                  </p>
-                </div>
               </div>
-            </CardContent>
-          )}
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Advanced</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-start justify-between gap-6">
-              <div className="space-y-1">
-                <Label htmlFor="enabled">Enabled</Label>
-                <p className="text-sm text-muted-foreground">Disabled services are removed from Traefik but kept here.</p>
-              </div>
-              <Switch id="enabled" checked={enabled} onCheckedChange={setEnabled} />
-            </div>
-            <div className="flex items-start gap-3 border-t pt-4 has-disabled:opacity-60">
-              <Checkbox
-                id="skip-verify"
-                checked={scheme === "https" && skipVerify}
-                disabled={scheme !== "https"}
-                onCheckedChange={(v) => setSkipVerify(v === true)}
-                className="mt-0.5"
-              />
-              <div className="space-y-1">
-                <Label htmlFor="skip-verify">Skip upstream TLS verification</Label>
-                <p className="text-sm text-muted-foreground">
-                  Accept self-signed certificates from the target. Only applies to https targets.
-                </p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Wide screens: a live summary of the route next to the form, with the form's actions. */}
-      <aside className="sticky top-8 hidden space-y-4 xl:block">
-        {existing && <StatusCard host={existing} traefik={props.traefik} />}
-        <Card className="gap-4">
-          <CardHeader>
-            <CardTitle>Route</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ol>
-              <RouteStep icon={Globe} label="Visitors open">
-                {rows.map((r, i) => (
-                  <p key={i} className="truncate font-mono text-sm">
-                    {r.base ? joinHostname(r) : <span className="text-muted-foreground">no domain yet</span>}
-                  </p>
-                ))}
-              </RouteStep>
-              <RouteStep icon={TraefikIcon} label="Traefik applies">
-                <ul className="space-y-0.5 text-sm">
-                  <li>HTTPS with Let's Encrypt</li>
-                  <li className={cn(!basicAuth && "text-muted-foreground")}>
-                    {basicAuth
-                      ? `Basic auth · ${users.length} ${users.length === 1 ? "user" : "users"}`
-                      : "No login required"}
-                  </li>
-                  {clientAuth !== "off" && (
-                    <li>
-                      {clientAuth === "require" ? "Client certificate required" : "Client certificate checked if sent"} ·{" "}
-                      {caIds.length} {caIds.length === 1 ? "CA" : "CAs"}
-                    </li>
-                  )}
-                  <li className={cn(!healthCheck && "text-muted-foreground")}>
-                    {healthCheck ? (
-                      <>
-                        Health check on <code className="font-mono">{healthPath.trim() || "/"}</code>
-                      </>
-                    ) : (
-                      "No health check"
-                    )}
-                  </li>
-                  {!enabled && <li className="text-warning">Disabled: not routed</li>}
-                </ul>
-              </RouteStep>
-              <RouteStep icon={Server} osIcon={device?.os} label="and forwards to" last>
+              <div className="flex min-w-0 items-center gap-2 rounded-md border bg-muted/30 px-3 py-2">
+                <span className="truncate font-mono text-xs">{firstDomain}</span>
+                <ArrowRight className="size-3.5 shrink-0 text-muted-foreground" />
                 {device || existing ? (
                   <DeviceBadge device={device} name={device?.name ?? existing!.deviceName} className="h-6 text-xs" />
                 ) : (
-                  <p className="text-sm text-muted-foreground">No peer selected</p>
+                  <span className="text-xs text-muted-foreground">select a peer</span>
                 )}
-                <p className="font-mono text-xs text-muted-foreground">
-                  {scheme}://{device?.ipv4 ?? existing?.targetIp ?? "peer"}:{port || "port"}
-                </p>
-              </RouteStep>
-            </ol>
-          </CardContent>
-        </Card>
-        {error && (
-          <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
-        <div className="grid gap-2">
-          <Button type="submit" disabled={saving}>
-            {saving && <Loader2 className="animate-spin" />}
-            {existing ? "Save changes" : "Create service"}
-          </Button>
-          <Button type="button" variant="outline" onClick={props.onCancel}>
-            Cancel
-          </Button>
-          <p className="text-center text-xs text-muted-foreground">Traefik applies changes within ~5 seconds.</p>
-        </div>
-      </aside>
-      </div>
+                <span className="font-mono text-xs text-muted-foreground">
+                  {scheme === "https" ? "https " : ""}:{port || "port"}
+                </span>
+              </div>
+            </Section>
+          </TabsContent>
 
-      <div className="sticky bottom-0 mt-6 -mb-8 space-y-3 border-t bg-background/95 py-4 backdrop-blur xl:hidden">
+          <TabsContent value="auth" className="space-y-5">
+
+            <Section
+              title="Basic auth"
+              description="Ask visitors for a username and password. Credentials are stripped before reaching the service."
+              action={<Switch checked={basicAuth} onCheckedChange={toggleBasicAuth} aria-label="Require basic auth" />}
+            >
+              {basicAuth && (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-[1fr_1fr_2.25rem] gap-2 text-xs font-medium text-muted-foreground">
+                    <span>Username</span>
+                    <span>Password</span>
+                  </div>
+                  {users.map((u) => (
+                    <div key={u.key} className="grid grid-cols-[1fr_1fr_2.25rem] gap-2">
+                      <Input
+                        value={u.username}
+                        onChange={(e) => setUser(u.key, { username: e.target.value.replace(/[\s:]/g, "") })}
+                        placeholder="alice"
+                        aria-label="Username"
+                        autoComplete="off"
+                        className="font-mono"
+                      />
+                      <Input
+                        type="password"
+                        value={u.password}
+                        onChange={(e) => setUser(u.key, { password: e.target.value })}
+                        placeholder={u.previous ? "•••••••• (unchanged)" : "At least 8 characters"}
+                        aria-label="Password"
+                        autoComplete="new-password"
+                        className="font-mono"
+                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="text-muted-foreground"
+                        onClick={() => setUsers((us) => us.filter((x) => x.key !== u.key))}
+                        aria-label={`Remove ${u.username || "user"}`}
+                      >
+                        <Trash2 />
+                      </Button>
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-between gap-4">
+                    <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <KeyRound className="size-3" /> Stored as bcrypt hashes; passwords can't be shown again.
+                    </p>
+                    <Button type="button" variant="ghost" size="sm" className="text-muted-foreground" onClick={addUser}>
+                      <Plus /> Add user
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </Section>
+
+            <Section
+              title="Client certificates"
+              description="Traefik asks visitors for a certificate signed by one of your CAs before any request reaches the service."
+              action={
+                <Switch
+                  checked={clientAuth !== "off"}
+                  onCheckedChange={(on) => setClientAuth(on ? "require" : "off")}
+                  aria-label="Verify client certificates"
+                />
+              }
+            >
+              {clientAuth !== "off" && (
+                <div className="space-y-4">
+                  {props.clientCas.length === 0 ? (
+                    <div className="flex items-center justify-between gap-4 rounded-lg border border-dashed p-4">
+                      <p className="text-sm text-muted-foreground">You haven't added a client CA yet.</p>
+                      <Button type="button" variant="outline" size="sm" onClick={props.onOpenClientCas}>
+                        <ShieldCheck /> Manage client CAs
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <Label>Trusted CAs</Label>
+                      <div className="divide-y rounded-lg border">
+                        {props.clientCas.map((ca) => {
+                          const id = `ca-${ca.id}`;
+                          const expired = new Date(ca.summary.notAfter).getTime() < Date.now();
+                          return (
+                            <label key={ca.id} htmlFor={id} className="flex cursor-pointer items-center gap-3 px-3 py-2.5">
+                              <Checkbox
+                                id={id}
+                                checked={caIds.includes(ca.id)}
+                                onCheckedChange={(v) =>
+                                  setCaIds((ids) => (v === true ? [...ids, ca.id] : ids.filter((x) => x !== ca.id)))
+                                }
+                              />
+                              <div className="min-w-0 flex-1 leading-tight">
+                                <p className="truncate text-sm font-medium">{ca.name}</p>
+                                <p className="truncate text-xs text-muted-foreground">CN={ca.summary.subject}</p>
+                              </div>
+                              {expired && <span className="text-xs text-destructive">Expired</span>}
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Any certificate signed by a checked CA is accepted.{" "}
+                        <button type="button" className="underline" onClick={props.onOpenClientCas}>
+                          Manage client CAs
+                        </button>
+                      </p>
+                    </div>
+                  )}
+                  <div className="grid gap-2">
+                    <Label>Visitors without a valid certificate</Label>
+                    <Select value={clientAuth} onValueChange={(v) => setClientAuth(v as ClientAuth)}>
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="require">Are rejected during the handshake</SelectItem>
+                        <SelectItem value="optional">Get through; certificates are verified if presented</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    {clientAuth === "optional" && (
+                      <p className="text-xs text-muted-foreground">
+                        Useful when the service decides itself, e.g. by forwarding the certificate details below. Invalid
+                        certificates are still rejected.
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <Checkbox
+                      id="cert-headers"
+                      checked={certHeaders}
+                      onCheckedChange={(v) => setCertHeaders(v === true)}
+                      className="mt-0.5"
+                    />
+                    <div className="space-y-1">
+                      <Label htmlFor="cert-headers">Forward certificate details</Label>
+                      <p className="text-sm text-muted-foreground">
+                        Pass the verified certificate's subject, issuer, serial and validity to the service in the{" "}
+                        <code className="font-mono text-xs">X-Forwarded-Tls-Client-Cert-Info</code> header (URL-encoded).
+                        A value sent by the client is always dropped.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </Section>
+
+          </TabsContent>
+
+          <TabsContent value="advanced" className="space-y-5">
+            <Section
+              title="Enabled"
+              description="Disabled services are removed from Traefik but kept here."
+              action={<Switch checked={enabled} onCheckedChange={setEnabled} aria-label="Enabled" />}
+            />
+            <Section
+              title="Skip upstream TLS verification"
+              description="Connect to the target over https and accept its certificate even if it's self-signed or doesn't match."
+              action={
+                <Switch
+                  checked={scheme === "https" && skipVerify}
+                  onCheckedChange={(on) => {
+                    setSkipVerify(on);
+                    // Verification only exists for https targets, so asking to skip it implies https.
+                    if (on) setScheme("https");
+                  }}
+                  aria-label="Skip upstream TLS verification"
+                />
+              }
+            />
+          </TabsContent>
+        </div>
+      </Tabs>
+
+      <div className="space-y-3 border-t px-6 py-4">
         {error && (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
@@ -680,42 +576,5 @@ function ServiceForm(
         </div>
       </div>
     </form>
-  );
-}
-
-function StatusCard({ host, traefik }: { host: ProxyHost; traefik: TraefikStatus | null }) {
-  const state = serviceState(host, traefik);
-  return (
-    <Card className="flex-row items-start gap-3 px-6">
-      <StateTile state={state} />
-      <div className="min-w-0 space-y-1">
-        <p className="text-sm font-medium">{state.label}</p>
-        <p className="text-xs text-muted-foreground">{state.detail}</p>
-      </div>
-    </Card>
-  );
-}
-
-/** One hop of the route summary, joined to the next by a vertical line. */
-function RouteStep(props: {
-  icon: LucideIcon | typeof TraefikIcon;
-  /** Shows the peer's OS icon instead of `icon`. */
-  osIcon?: string;
-  label: string;
-  last?: boolean;
-  children: React.ReactNode;
-}) {
-  const Icon = props.icon;
-  return (
-    <li className={cn("relative flex gap-3", !props.last && "pb-5")}>
-      {!props.last && <span className="absolute top-9 bottom-1 left-4 w-px bg-border" aria-hidden />}
-      <div className="flex size-8 shrink-0 items-center justify-center rounded-full border bg-muted/40 text-muted-foreground">
-        {props.osIcon !== undefined ? <OsIcon os={props.osIcon} className="size-3.5" /> : <Icon className="size-3.5" />}
-      </div>
-      <div className="min-w-0 flex-1 space-y-1 pt-1">
-        <p className="text-xs text-muted-foreground">{props.label}</p>
-        {props.children}
-      </div>
-    </li>
   );
 }
