@@ -21,6 +21,8 @@ services:
     depends_on:
       tailscale:
         condition: service_started
+      volume-init:
+        condition: service_completed_successfully
     environment:
       HOST: 127.0.0.1
       # Traefik's API and websecure entrypoint, on tailscale-edge's control network address.
@@ -106,14 +108,19 @@ services:
       control:
         ipv4_address: 172.31.255.3
 
-  # Hands the ACME volume to Traefik's unprivileged user (also migrates volumes created by a root Traefik).
-  traefik-init:
+  # Hands the volumes to the unprivileged user proxytail and Traefik both run as (65532), whoever created them: ACME
+  # volumes from a root Traefik, or a traefik-dynamic volume first mounted by an image without /traefik.
+  volume-init:
     image: busybox:1.37
     network_mode: none
     restart: "no"
-    command: ["sh", "-c", "chown -R 65532:65532 /letsencrypt && chmod 700 /letsencrypt"]
+    command:
+      - sh
+      - -c
+      - chown -R 65532:65532 /letsencrypt /dynamic && chmod 700 /letsencrypt && chmod 750 /dynamic
     volumes:
       - traefik-acme:/letsencrypt
+      - traefik-dynamic:/dynamic
 
   traefik:
     image: traefik:v3.5
@@ -133,7 +140,7 @@ services:
     depends_on:
       tailscale-edge:
         condition: service_started
-      traefik-init:
+      volume-init:
         condition: service_completed_successfully
       # The app writes the initial config on startup.
       app:

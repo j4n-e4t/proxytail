@@ -42,8 +42,8 @@ docker compose up -d    # proxytail + Traefik, each with a Tailscale sidecar
   needed on first start. Node identities are kept in the `tailscale-state` and `tailscale-edge-state` volumes, and app
   data in `proxytail-data`.
 - Both containers run read-only, without capabilities, and Traefik as an unprivileged user. A one-shot
-  `traefik-init` container hands the `traefik-acme` volume to that user, which also migrates volumes from older
-  versions.
+  `volume-init` container hands the `traefik-acme` and `traefik-dynamic` volumes to that user, which also migrates
+  volumes from older versions.
 - Pin a release with `PROXYTAIL_IMAGE=ghcr.io/j4n-e4t/proxytail:0.1.0`, or build locally with
   `docker compose up -d --build`.
 
