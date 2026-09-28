@@ -1,6 +1,5 @@
 # Development stack: Traefik in Docker, proxytail running on the host (`bun run dev`). Like production, Traefik reaches
 # tailnet peers through the host's Tailscale (Docker Desktop sends container traffic through the host's network stack).
-#   docker login dhi.io    # Traefik is a Docker Hardened Image (any Docker Hub account)
 #   docker compose -f docker-compose.dev.yml up -d
 #   docker compose -f docker-compose.dev.yml --profile crowdsec up -d   # + CrowdSec (set CROWDSEC_ENABLED=true for the app)
 #   docker compose -f docker-compose.dev.yml --profile demo up -d       # + an ephemeral whoami test peer
@@ -21,7 +20,8 @@ services:
       - traefik-logs:/volumes/traefik-logs
 
   traefik:
-    image: ${TRAEFIK_IMAGE:-dhi.io/traefik:3.7}
+    image: ${TRAEFIK_IMAGE:-traefik:v3.5}
+    user: "65532:65532"
     depends_on:
       volume-init:
         condition: service_completed_successfully
@@ -71,7 +71,7 @@ services:
       TRAEFIK_EXPERIMENTAL_PLUGINS_CROWDSEC_MODULENAME: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
       TRAEFIK_EXPERIMENTAL_PLUGINS_CROWDSEC_VERSION: ${CROWDSEC_BOUNCER_VERSION:-v1.7.1}
     healthcheck:
-      test: ["CMD", "/usr/bin/traefik", "healthcheck"]
+      test: ["CMD", "traefik", "healthcheck"]
       interval: 30s
       timeout: 5s
       start_period: 10s

@@ -29,7 +29,6 @@ tailscaled running in kernel mode (the default outside containers), so container
 
 ```sh
 cp .env.example .env    # set TS_OAUTH_CLIENT_ID and TS_OAUTH_CLIENT_SECRET
-docker login dhi.io     # Traefik is a Docker Hardened Image: log in with any Docker Hub account
 docker compose up -d    # proxytail and Traefik (CrowdSec is opt-in, see below)
 tailscale serve --bg --https=8443 http://127.0.0.1:3000
 ```
@@ -47,9 +46,7 @@ tailscale serve --bg --https=8443 http://127.0.0.1:3000
   device whose endpoints include the public address set under **Settings**.
 - Peers come from the Tailscale API through an OAuth client. Create one under **Settings → OAuth clients** in the admin
   console with only the `devices:core:read` scope: a leaked secret then exposes your device list and nothing else.
-- proxytail and Traefik run on [Docker Hardened Images](https://hub.docker.com/hardened-images/catalog) (`dhi.io/static`
-  and `dhi.io/traefik`): minimal, without a shell or package manager, as the unprivileged user 65532. See
-  [Hardening](#hardening).
+- proxytail and Traefik run as unprivileged users, read-only and without capabilities. See [Hardening](#hardening).
 - Pin a release with `PROXYTAIL_IMAGE=ghcr.io/j4n-e4t/proxytail:0.1.0`, or build locally with
   `docker compose up -d --build`.
 
@@ -111,6 +108,37 @@ certificates.
   a process limit, and Docker rotates their logs at 10 MB (3 files).
 - **Favicons:** proxytail fetches service icons from the backend itself. It follows redirects only on the backend (a
   `Location` naming another host is fetched from the backend too) and stops reading a response past its size limit.
+
+## Migrating from main
+
+The `crowdsec` branch isn't published to GHCR yet, so the migration builds the app on the proxy host.
+`scripts/migrate-from-main.sh` moves a running `main` stack over with CrowdSec off. Your services, domains, client CAs,
+settings and Let's Encrypt certificates stay in the same volumes: the database schema is unchanged, and nothing is
+reissued.
+
+```sh
+cd /path/to/proxytail            # the checkout main's stack was started from, with its .env
+git fetch origin && git checkout crowdsec
+scripts/migrate-from-main.sh
+```
+
+It stops before touching the running stack if anything is missing, and then:
+
+1. builds the app as `proxytail:crowdsec` and pulls Traefik while `main` keeps serving;
+2. stops the stack and backs up both volumes to `backups/proxytail-<time>.tar.gz`;
+3. saves `.env` as `.env.pre-migration` and sets `PROXYTAIL_IMAGE=proxytail:crowdsec`, so a later
+   `docker compose pull` can't swap `main`'s image back in (`docker compose pull` then fails for the app; update it
+   with `git pull && docker compose build app && docker compose up -d`);
+4. starts the new stack. `volume-init` hands the certificates to Traefik's unprivileged user;
+5. waits for both containers to be healthy, and prints the state of Traefik's routers.
+
+Services are down for the few seconds the containers are recreated. Afterwards, clients that send no hostname (SNI)
+get no TLS connection (see [Hardening](#hardening)). CrowdSec stays off until you add it (see [CrowdSec](#crowdsec)).
+
+To go back, run `scripts/migrate-from-main.sh rollback` **before** leaving the branch. It stops the stack, hands the
+certificates back to root, which `main`'s Traefik runs as, and restores `.env`. Then run
+`git checkout main && docker compose up -d --remove-orphans`. If the data itself needs restoring, the backup holds
+`data/` and `letsencrypt/`, the contents of the `proxytail_proxytail-data` and `proxytail_traefik-acme` volumes.
 
 ## CrowdSec
 
@@ -235,9 +263,7 @@ docker compose -f docker-compose.dev.yml up -d  # Traefik, pointed at the app on
 
 - typecheck, compile the binary, and smoke-test it;
 - build the multi-arch image. The Dockerfile cross-compiles on the native runner, so no QEMU is needed. It pushes to
-  GHCR on `main` (`:latest`, `:sha-…`) and on `v*` tags (`:1.2.3`, `:1.2`). The runtime base is pulled from
-  `dhi.io`, so the repository needs the `DHI_USERNAME` and `DHI_TOKEN` secrets: a Docker Hub username and a personal
-  access token with read access. Building locally needs `docker login dhi.io` too.
+  GHCR on `main` (`:latest`, `:sha-…`) and on `v*` tags (`:1.2.3`, `:1.2`).
 
 ## Not implemented yet
 

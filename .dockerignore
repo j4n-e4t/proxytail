@@ -9,3 +9,5 @@ data
 *.md
 docker-compose*.yml
 .DS_Store
+backups
+scripts

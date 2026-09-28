@@ -1,6 +1,5 @@
 # Production stack for a dedicated proxy host that is already on your tailnet (tailscaled on the host, kernel mode).
 #   cp .env.example .env   # set the OAuth client
-#   docker login dhi.io    # Traefik is a Docker Hardened Image (any Docker Hub account)
 #   docker compose up -d   # pulls ghcr.io/j4n-e4t/proxytail (or `--build` to build locally)
 #   tailscale serve --bg --https=8443 http://127.0.0.1:3000   # publish the UI on the tailnet
 #
@@ -50,7 +49,7 @@ services:
     pids_limit: 256
     logging: *logging
 
-  # Hands Traefik's volumes to its unprivileged user (65532), including volumes a root Traefik created before.
+  # Hands Traefik's volumes to its unprivileged user (65532), including volumes a root Traefik created before (main).
   # docker-compose.crowdsec.yml mounts the access log volume under /volumes too.
   volume-init:
     image: busybox:1.37
@@ -75,14 +74,15 @@ services:
     pids_limit: 16
     logging: *logging
 
-  # A Docker Hardened Image: runs as nonroot (65532) without a shell. It listens on unprivileged ports, so it needs no
+  # Runs as an unprivileged user (65532) instead of the image's root. It listens on unprivileged ports, so it needs no
   # capabilities at all; Docker publishes them on 80 and 443.
   #
   # The static configuration comes from environment variables rather than flags, so docker-compose.crowdsec.yml can
   # add to it (Traefik reads one source only: flags would have to be repeated in full).
   traefik:
-    image: ${TRAEFIK_IMAGE:-dhi.io/traefik:3.7}
+    image: ${TRAEFIK_IMAGE:-traefik:v3.5}
     restart: unless-stopped
+    user: "65532:65532"
     depends_on:
       app:
         condition: service_healthy
@@ -116,10 +116,12 @@ services:
       TRAEFIK_PROVIDERS_HTTP_ENDPOINT: http://app:3000/api/traefik/config
       TRAEFIK_PROVIDERS_HTTP_POLLINTERVAL: 5s
       TRAEFIK_LOG_LEVEL: INFO
+      # Access log on stdout, rotated by Docker (docker-compose.crowdsec.yml sends it to a file for CrowdSec).
+      TRAEFIK_ACCESSLOG: "true"
     volumes:
       - traefik-acme:/letsencrypt
     healthcheck:
-      test: ["CMD", "/usr/bin/traefik", "healthcheck"]
+      test: ["CMD", "traefik", "healthcheck"]
       interval: 30s
       timeout: 5s
       start_period: 10s

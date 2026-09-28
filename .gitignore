@@ -1,9 +1,11 @@
 node_modules
 data
 .env
+.env.pre-migration
 *.tsbuildinfo
 .DS_Store
 dist
 
 # Terraform
 terraform
+backups

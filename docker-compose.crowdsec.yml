@@ -31,12 +31,11 @@ services:
   traefik:
     environment:
       # The access log goes to a file that CrowdSec reads. It keeps the User-Agent, which some scenarios need.
-      TRAEFIK_ACCESSLOG: "true"
       TRAEFIK_ACCESSLOG_FILEPATH: /var/log/traefik/access.log
       TRAEFIK_ACCESSLOG_FORMAT: json
       TRAEFIK_ACCESSLOG_FIELDS_HEADERS_NAMES_User-Agent: keep
       # CrowdSec's bouncer, used by services once it's enabled under Settings. Traefik fetches it from
-      # plugins.traefik.io on start, into ./plugins-storage.
+      # plugins.traefik.io on start, into ./plugins-storage (the working directory is /).
       TRAEFIK_EXPERIMENTAL_PLUGINS_CROWDSEC_MODULENAME: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
       TRAEFIK_EXPERIMENTAL_PLUGINS_CROWDSEC_VERSION: ${CROWDSEC_BOUNCER_VERSION:-v1.7.1}
     working_dir: /
