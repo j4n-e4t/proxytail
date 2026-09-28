@@ -44,8 +44,14 @@ async function loadSecret(name: string): Promise<string | null> {
   }
 }
 
-const bouncerKey = await loadSecret("bouncer_key_traefik");
-const registrationToken = await loadSecret("registration_token");
+/**
+ * CrowdSec is opt-in (CROWDSEC_ENABLED): without it, proxytail creates no secrets, never adds the bouncer to Traefik
+ * (whose static configuration then lacks the plugin), and the UI leaves CrowdSec out.
+ */
+export const crowdsecIntegration = /^(1|true|yes|on)$/i.test(process.env.CROWDSEC_ENABLED?.trim() ?? "");
+
+const bouncerKey = crowdsecIntegration ? await loadSecret("bouncer_key_traefik") : null;
+const registrationToken = crowdsecIntegration ? await loadSecret("registration_token") : null;
 
 export interface CrowdsecConfig {
   /** Traefik blocks IPs CrowdSec has a decision for, on every service. */
@@ -74,7 +80,8 @@ export function saveCrowdsecConfig(c: CrowdsecConfig) {
 /** The bouncer middleware for Traefik's dynamic configuration, or null while it's off. */
 export function bouncerMiddleware() {
   const c = crowdsecConfig();
-  if (!c.enabled) return null;
+  // Blocking may have been turned on while the integration was, and stays saved while it's off.
+  if (!crowdsecIntegration || !c.enabled) return null;
   return {
     plugin: {
       [PLUGIN]: {

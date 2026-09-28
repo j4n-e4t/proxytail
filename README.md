@@ -13,8 +13,8 @@ browser ──► app.example.com ──► Traefik ──► host's tailscale0 
 
 - **proxytail** (Bun + SQLite + React, shadcn/ui on Tailwind v4) stores your domains and services, lists tailnet peers
   through the Tailscale API, and serves Traefik's dynamic configuration.
-- **CrowdSec** reads Traefik's access log, bans IPs that scan or attack your services, and answers Traefik's bouncer
-  plugin. See [CrowdSec](#crowdsec).
+- **CrowdSec** (optional) reads Traefik's access log, bans IPs that scan or attack your services, and answers
+  Traefik's bouncer plugin. See [CrowdSec](#crowdsec).
 - **Traefik** and proxytail run as containers on a private Docker network, on a dedicated proxy host that is itself on
   your tailnet. Traefik reaches peers through the host's Tailscale, and proxytail's UI is only published on the host's
   loopback, for `tailscale serve`.
@@ -29,7 +29,8 @@ tailscaled running in kernel mode (the default outside containers), so container
 
 ```sh
 cp .env.example .env    # set TS_OAUTH_CLIENT_ID and TS_OAUTH_CLIENT_SECRET
-docker compose up -d    # proxytail, Traefik and CrowdSec
+docker login dhi.io     # Traefik is a Docker Hardened Image: log in with any Docker Hub account
+docker compose up -d    # proxytail and Traefik (CrowdSec is opt-in, see below)
 tailscale serve --bg --https=8443 http://127.0.0.1:3000
 ```
 
@@ -42,11 +43,13 @@ tailscale serve --bg --https=8443 http://127.0.0.1:3000
   router status from it over the Docker network.
 - Every enabled service receives a Let's Encrypt certificate automatically. Keep port 80 reachable from the internet,
   point each hostname at the public address, and persist the `traefik-acme` volume so certificates survive restarts.
-- The sidebar shows the versions of Tailscale, Traefik and CrowdSec. For Tailscale, that's the proxy host's client: the
+- The sidebar shows the versions of Tailscale, Traefik and, if it's on, CrowdSec. For Tailscale, that's the proxy host's client: the
   device whose endpoints include the public address set under **Settings**.
 - Peers come from the Tailscale API through an OAuth client. Create one under **Settings → OAuth clients** in the admin
   console with only the `devices:core:read` scope: a leaked secret then exposes your device list and nothing else.
-- proxytail and Traefik run read-only and without capabilities, except for Traefik binding ports 80 and 443.
+- proxytail and Traefik run on [Docker Hardened Images](https://hub.docker.com/hardened-images/catalog) (`dhi.io/static`
+  and `dhi.io/traefik`): minimal, without a shell or package manager, as the unprivileged user 65532. See
+  [Hardening](#hardening).
 - Pin a release with `PROXYTAIL_IMAGE=ghcr.io/j4n-e4t/proxytail:0.1.0`, or build locally with
   `docker compose up -d --build`.
 
@@ -58,7 +61,7 @@ Then, in the UI:
    verified against public DNS resolvers.
 3. **Services:** pick a subdomain, a tailnet peer, and a port. The route goes live within about 5 seconds.
 4. Optionally, **Client CAs:** require client certificates for a service. See [Client certificates (mTLS)](#client-certificates-mtls).
-5. Optionally, **Settings → CrowdSec:** block IPs CrowdSec has banned. See [CrowdSec](#crowdsec).
+5. Optionally, add CrowdSec and block the IPs it bans under **Settings → CrowdSec**. See [CrowdSec](#crowdsec).
 
 Only peers tagged `tag:proxytail-backend` are listed and can be targeted. Change the tag under **Settings** or with
 `TS_BACKEND_TAG`. Define the tag under `tagOwners` in your tailnet policy and apply it to each backend, e.g.
@@ -90,13 +93,38 @@ certificates.
 - A client can't get around the check by sending a different SNI name than the `Host` header, e.g. the name of a
   service without client certificates: Traefik answers `421 Misdirected Request` when their TLS options differ.
 
+## Hardening
+
+- **TLS:** Traefik refuses TLS handshakes for hostnames it has no certificate for (`sniStrict`), including clients that
+  send no hostname at all. Scanners probing the IP get no certificate that reveals Traefik, and a service whose Let's
+  Encrypt certificate is still being issued refuses connections until it arrives (the UI shows **Issuing**). Clients
+  need TLS 1.2 or newer; set `TLS_MIN_VERSION=1.3` to require TLS 1.3. proxytail puts both into Traefik's default TLS
+  option and into every service's own option (for client certificates), because a service's option replaces the
+  default rather than extending it.
+- **Unprivileged containers:** proxytail and Traefik run as user 65532 with a read-only filesystem, no capabilities
+  and `no-new-privileges`. Traefik listens on 8000 and 8443 inside its container, and Docker publishes them on
+  `HTTP_PORT` and `HTTPS_PORT`. A one-shot `volume-init` container hands Traefik's volumes to its user, including
+  volumes a root Traefik created before.
+- **Traefik's API** is only reachable on the Docker network, and its dashboard is off. Traefik doesn't check for new
+  versions or send usage statistics, and Docker checks its health through `/ping`.
+- **Resources:** every container has a memory limit (`APP_MEM_LIMIT`, `TRAEFIK_MEM_LIMIT`, `CROWDSEC_MEM_LIMIT`) and
+  a process limit, and Docker rotates their logs at 10 MB (3 files).
+- **Favicons:** proxytail fetches service icons from the backend itself. It follows redirects only on the backend (a
+  `Location` naming another host is fetched from the backend too) and stops reading a response past its size limit.
+
 ## CrowdSec
 
-The stack includes [CrowdSec](https://www.crowdsec.net). It reads Traefik's access log, detects scanners, brute force
+[CrowdSec](https://www.crowdsec.net) is opt-in. It reads Traefik's access log, detects scanners, brute force
 and known CVE probes (the `crowdsecurity/traefik` and `crowdsecurity/http-cve` collections), and bans the source IPs.
 It also receives the community blocklist.
 
-Detection always runs. Blocking is off until you turn on **Block banned IPs** under **Settings → CrowdSec**. Then every
+To add it, uncomment `COMPOSE_FILE=docker-compose.yml:docker-compose.crowdsec.yml` in `.env` and run
+`docker compose up -d`. That adds CrowdSec and a log rotation container, turns on Traefik's access log and bouncer
+plugin, and shows the **Security** page and **Settings → CrowdSec** in the UI. To go back to plain Traefik, comment it
+out again and run `docker compose up -d --remove-orphans`: proxytail stops adding the bouncer, even if blocking was on,
+and the CrowdSec volumes are kept for later.
+
+Once it's added, detection always runs. Blocking is off until you turn on **Block banned IPs** under **Settings → CrowdSec**. Then every
 service gets Traefik's [CrowdSec bouncer plugin](https://plugins.traefik.io/plugins/6335346ca4caa9ddeffda116/crowdsec-bouncer-traefik-plugin)
 as its first middleware, before basic auth. Banned IPs get a `403`.
 
@@ -188,10 +216,11 @@ docker compose -f docker-compose.dev.yml up -d  # Traefik, pointed at the app on
 - `docker compose -f docker-compose.dev.yml --profile demo up -d` adds an ephemeral `proxytail-demo` peer running
   `demo/server.ts` on port 80, which is useful as a first target. Like `traefik/whoami`, it echoes each request, as a
   page with its own favicon.
-- The dev stack includes CrowdSec. Its Local API and metrics are published on `127.0.0.1:8081` and
-  `127.0.0.1:6060` for the app on the host (`CROWDSEC_LAPI_URL`, `CROWDSEC_METRICS_URL`). The app writes its
-  CrowdSec secrets to `data/crowdsec/`, which Traefik and CrowdSec mount. Start the app before CrowdSec: CrowdSec
-  restarts until the registration token exists.
+- `docker compose -f docker-compose.dev.yml --profile crowdsec up -d` adds CrowdSec; set `CROWDSEC_ENABLED=true` for
+  the app. Its Local API and metrics are published on `127.0.0.1:8081` and `127.0.0.1:6060` for the app on the host
+  (`CROWDSEC_LAPI_URL`, `CROWDSEC_METRICS_URL`). The app writes its CrowdSec secrets to `data/crowdsec/`, which Traefik
+  and CrowdSec mount. Start the app before CrowdSec: CrowdSec restarts until the registration token exists. The dev
+  Traefik always loads the bouncer plugin.
 - To develop without a tailnet, set `TS_MOCK_DEVICES=/path/devices.json`. The file uses the Tailscale API's
   `{ "devices": [...] }` format.
 - `bun run build` compiles the server and the bundled frontend into a single executable, `dist/proxytail`. On macOS,
@@ -206,7 +235,9 @@ docker compose -f docker-compose.dev.yml up -d  # Traefik, pointed at the app on
 
 - typecheck, compile the binary, and smoke-test it;
 - build the multi-arch image. The Dockerfile cross-compiles on the native runner, so no QEMU is needed. It pushes to
-  GHCR on `main` (`:latest`, `:sha-…`) and on `v*` tags (`:1.2.3`, `:1.2`).
+  GHCR on `main` (`:latest`, `:sha-…`) and on `v*` tags (`:1.2.3`, `:1.2`). The runtime base is pulled from
+  `dhi.io`, so the repository needs the `DHI_USERNAME` and `DHI_TOKEN` secrets: a Docker Hub username and a personal
+  access token with read access. Building locally needs `docker login dhi.io` too.
 
 ## Not implemented yet
 

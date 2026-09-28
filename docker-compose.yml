@@ -1,12 +1,22 @@
 # Production stack for a dedicated proxy host that is already on your tailnet (tailscaled on the host, kernel mode).
 #   cp .env.example .env   # set the OAuth client
+#   docker login dhi.io    # Traefik is a Docker Hardened Image (any Docker Hub account)
 #   docker compose up -d   # pulls ghcr.io/j4n-e4t/proxytail (or `--build` to build locally)
 #   tailscale serve --bg --https=8443 http://127.0.0.1:3000   # publish the UI on the tailnet
+#
+# CrowdSec is opt-in: docker-compose.crowdsec.yml adds it on top of this file (see COMPOSE_FILE in .env.example).
 #
 # There is no login: whoever can reach the UI has full access. It's only published on the host's loopback, and
 # `tailscale serve` puts it on the tailnet, where the tailnet policy decides who can reach it.
 # Traefik reaches tailnet peers through the host's routing table, i.e. the host's tailscale0.
 name: proxytail
+
+# Docker's own logs (stdout/stderr) are rotated, so a chatty container can't fill the disk.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
 
 services:
   app:
@@ -17,22 +27,18 @@ services:
       # All interfaces inside the container; the port is only published on the host's loopback below.
       HOST: 0.0.0.0
       TRAEFIK_API_URL: http://traefik:8080
-      TRAEFIK_TLS_ADDR: traefik:443
+      TRAEFIK_TLS_ADDR: traefik:8443
+      TLS_MIN_VERSION: ${TLS_MIN_VERSION:-1.2}
       TS_OAUTH_CLIENT_ID: ${TS_OAUTH_CLIENT_ID:-}
       TS_OAUTH_CLIENT_SECRET: ${TS_OAUTH_CLIENT_SECRET:-}
       TS_TAILNET: ${TS_TAILNET:-}
       TS_BACKEND_TAG: ${TS_BACKEND_TAG:-}
       PUBLIC_ADDRESS: ${PUBLIC_ADDRESS:-}
       UI_HOSTS: ${UI_HOSTS:-}
-      CROWDSEC_LAPI_URL: http://crowdsec:8080
-      CROWDSEC_METRICS_URL: http://crowdsec:6060/metrics
-      CROWDSEC_SECRETS_DIR: /crowdsec
     ports:
       - "127.0.0.1:${UI_PORT:-3000}:3000"
     volumes:
       - proxytail-data:/data
-      # proxytail generates the CrowdSec bouncer key and registration token here on first start.
-      - crowdsec-secrets:/crowdsec
     read_only: true
     tmpfs:
       - /tmp
@@ -40,136 +46,93 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    mem_limit: ${APP_MEM_LIMIT:-256m}
+    pids_limit: 256
+    logging: *logging
 
-  traefik:
-    image: traefik:v3.5
-    restart: unless-stopped
-    depends_on:
-      app:
-        condition: service_healthy
-    ports:
-      - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
+  # Hands Traefik's volumes to its unprivileged user (65532), including volumes a root Traefik created before.
+  # docker-compose.crowdsec.yml mounts the access log volume under /volumes too.
+  volume-init:
+    image: busybox:1.37
+    restart: "no"
+    network_mode: none
+    command:
+      - sh
+      - -c
+      - chown -R 65532:65532 /volumes/* && chmod 700 /volumes/letsencrypt
     volumes:
-      - traefik-acme:/letsencrypt
-      - traefik-logs:/var/log/traefik
-      - crowdsec-secrets:/run/secrets:ro
-    # Traefik downloads the CrowdSec bouncer plugin here on every start.
-    tmpfs:
-      - /plugins-storage
+      - traefik-acme:/volumes/letsencrypt
     read_only: true
     cap_drop:
       - ALL
     cap_add:
-      - NET_BIND_SERVICE
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
     security_opt:
       - no-new-privileges:true
-    command:
-      - --entrypoints.web.address=:80
-      # All HTTP traffic is redirected to HTTPS (ACME HTTP-01 challenges on :80 are still answered first).
-      # A port rather than "websecure", so the redirect targets the published port when HTTPS_PORT isn't 443.
-      - --entrypoints.web.http.redirections.entrypoint.to=:${HTTPS_PORT:-443}
-      - --entrypoints.web.http.redirections.entrypoint.scheme=https
-      - --entrypoints.web.http.redirections.entrypoint.permanent=true
-      - --entrypoints.websecure.address=:443
-      # Let's Encrypt via the HTTP-01 challenge: every service gets a certificate automatically.
-      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
-      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
-      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
-      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-}
-      - --certificatesresolvers.letsencrypt.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}
-      # Unauthenticated API on :8080, only reachable on the Docker network (not published): proxytail reads router
-      # status from it.
-      - --api.insecure=true
-      - --providers.http.endpoint=http://app:3000/api/traefik/config
-      - --providers.http.pollInterval=5s
-      - --log.level=INFO
-      # The access log goes to a file that CrowdSec reads. It keeps the User-Agent, which some scenarios need.
-      - --accesslog=true
-      - --accesslog.filepath=/var/log/traefik/access.log
-      - --accesslog.format=json
-      - --accesslog.fields.headers.names.User-Agent=keep
-      # CrowdSec's bouncer, used by services once it's enabled under Settings. Traefik fetches it from
-      # plugins.traefik.io on start.
-      - --experimental.plugins.crowdsec.modulename=github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
-      - --experimental.plugins.crowdsec.version=${CROWDSEC_BOUNCER_VERSION:-v1.7.1}
+    mem_limit: 32m
+    pids_limit: 16
+    logging: *logging
 
-  # Detects attacks in Traefik's access log and runs the Local API the bouncer asks about each client IP. Neither
-  # the API (8080) nor metrics (6060) are published: proxytail and Traefik reach them on the Docker network.
-  crowdsec:
-    image: crowdsecurity/crowdsec:${CROWDSEC_VERSION:-v1.8.1}
+  # A Docker Hardened Image: runs as nonroot (65532) without a shell. It listens on unprivileged ports, so it needs no
+  # capabilities at all; Docker publishes them on 80 and 443.
+  #
+  # The static configuration comes from environment variables rather than flags, so docker-compose.crowdsec.yml can
+  # add to it (Traefik reads one source only: flags would have to be repeated in full).
+  traefik:
+    image: ${TRAEFIK_IMAGE:-dhi.io/traefik:3.7}
     restart: unless-stopped
     depends_on:
       app:
-        # The app creates the secrets CrowdSec reads on start.
         condition: service_healthy
+      volume-init:
+        condition: service_completed_successfully
+    ports:
+      - "${HTTP_PORT:-80}:8000"
+      - "${HTTPS_PORT:-443}:8443"
     environment:
-      COLLECTIONS: crowdsecurity/traefik crowdsecurity/http-cve
+      TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":8000"
+      # All HTTP traffic is redirected to HTTPS (ACME HTTP-01 challenges on :80 are still answered first).
+      # The published port rather than "websecure", whose port only exists inside the container.
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_REDIRECTIONS_ENTRYPOINT_TO: ":${HTTPS_PORT:-443}"
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_REDIRECTIONS_ENTRYPOINT_SCHEME: https
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_REDIRECTIONS_ENTRYPOINT_PERMANENT: "true"
+      TRAEFIK_ENTRYPOINTS_WEBSECURE_ADDRESS: ":8443"
+      # Let's Encrypt via the HTTP-01 challenge: every service gets a certificate automatically.
+      TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_ACME_HTTPCHALLENGE: "true"
+      TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_ACME_HTTPCHALLENGE_ENTRYPOINT: web
+      TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_ACME_STORAGE: /letsencrypt/acme.json
+      TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_ACME_EMAIL: ${ACME_EMAIL:-}
+      TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_ACME_CASERVER: ${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}
+      # Unauthenticated API on :8080, only reachable on the Docker network (not published): proxytail reads router
+      # status from it. The dashboard is off; the API is all proxytail needs.
+      TRAEFIK_API_INSECURE: "true"
+      TRAEFIK_API_DASHBOARD: "false"
+      # For the healthcheck below, on the same internal :8080.
+      TRAEFIK_PING: "true"
+      TRAEFIK_GLOBAL_CHECKNEWVERSION: "false"
+      TRAEFIK_GLOBAL_SENDANONYMOUSUSAGE: "false"
+      TRAEFIK_PROVIDERS_HTTP_ENDPOINT: http://app:3000/api/traefik/config
+      TRAEFIK_PROVIDERS_HTTP_POLLINTERVAL: 5s
+      TRAEFIK_LOG_LEVEL: INFO
     volumes:
-      - crowdsec-db:/var/lib/crowdsec/data
-      - crowdsec-config:/etc/crowdsec
-      - traefik-logs:/var/log/traefik:ro
-      - crowdsec-secrets:/run/secrets:ro
-    # The auto-registration token proxytail registers itself with (see crowdsec-local below) comes from the secrets.
-    entrypoint:
-      - /bin/bash
-      - -c
-      - export REGISTRATION_TOKEN="$$(cat /run/secrets/registration_token)" && exec /bin/bash /docker_start.sh
-    configs:
-      - source: crowdsec-acquis
-        target: /etc/crowdsec/acquis.d/traefik.yaml
-      - source: crowdsec-local
-        target: /etc/crowdsec/config.yaml.local
-      - source: crowdsec-context
-        target: /etc/crowdsec/contexts/proxytail.yaml
-    security_opt:
-      - no-new-privileges:true
-
-  # Traefik doesn't rotate its access log, so this truncates it past 100 MB. Traefik appends, and CrowdSec follows
-  # the truncation.
-  logrotate:
-    image: busybox:stable
-    restart: unless-stopped
-    command:
-      - sh
-      - -c
-      - while :; do find /var/log/traefik -name access.log -size +102400k -exec truncate -s 0 {} +; sleep 300; done
-    volumes:
-      - traefik-logs:/var/log/traefik
-    network_mode: none
+      - traefik-acme:/letsencrypt
+    healthcheck:
+      test: ["CMD", "/usr/bin/traefik", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     read_only: true
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
-
-configs:
-  crowdsec-acquis:
-    content: |
-      filenames:
-        - /var/log/traefik/access.log
-      labels:
-        type: traefik
-  # Lets proxytail register itself as a machine, to read alerts. CrowdSec expands the variable, not Compose.
-  crowdsec-local:
-    content: |
-      api:
-        server:
-          auto_registration:
-            enabled: true
-            token: $${REGISTRATION_TOKEN}
-            allowed_ranges: [127.0.0.1/32, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
-  # Alerts carry the hostname that was attacked, so proxytail can attribute them to services.
-  crowdsec-context:
-    content: |
-      context:
-        target_fqdn:
-          - evt.Meta.target_fqdn
+    mem_limit: ${TRAEFIK_MEM_LIMIT:-512m}
+    pids_limit: 512
+    logging: *logging
 
 volumes:
   proxytail-data:
   traefik-acme:
-  traefik-logs:
-  crowdsec-secrets:
-  crowdsec-db:
-  crowdsec-config:

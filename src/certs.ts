@@ -22,8 +22,10 @@ function tlsTarget() {
 }
 
 /**
- * Connects to Traefik with the given SNI and inspects the certificate it serves. Traefik answers with its
- * self-signed "TRAEFIK DEFAULT CERT" until the ACME certificate for that hostname has been issued.
+ * Connects to Traefik with the given SNI and inspects the certificate it serves. Until the ACME certificate for that
+ * hostname has been issued, Traefik refuses the handshake with an `unrecognized_name` alert (sniStrict, see
+ * traefik.ts), which Bun reports as a completed handshake without a certificate. Without sniStrict, it would answer
+ * with its self-signed "TRAEFIK DEFAULT CERT" instead.
  *
  * Also works for services that require a client certificate, although the probe sends none: the server certificate
  * arrives before Traefik asks for the client's, and with TLS 1.3 Traefik only rejects the missing certificate after
@@ -49,7 +51,11 @@ export function probeCertificate(servername: string): Promise<CertInfo> {
       done({ ...base, state: "untrusted", error: String(socket.authorizationError ?? "not trusted") });
     });
     socket.once("timeout", () => done({ state: "error", error: `TLS connection to ${host}:${port} timed out` }));
-    socket.once("error", (e) => done({ state: "error", error: e.message }));
+    socket.once("error", (e) => {
+      // Node reports the sniStrict refusal as an error rather than a handshake without a certificate.
+      if (/unrecognized.name/i.test(e.message)) return done({ state: "pending" });
+      done({ state: "error", error: e.message });
+    });
   });
 }
 

@@ -100,6 +100,8 @@ export interface Settings {
   backendTag: string;
   /** The proxy host's Tailscale version, when it could be found in the tailnet. */
   tailscaleVersion: string | null;
+  /** The CrowdSec integration is on: the Security page and CrowdSec settings are shown. */
+  crowdsec: boolean;
 }
 
 export interface CertInfo {

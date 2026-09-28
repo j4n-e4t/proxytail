@@ -6,6 +6,7 @@ import { crowdsecStats, deleteDecision, RANGES, type StatsRange } from "./crowds
 import {
   CrowdsecError,
   crowdsecConfig,
+  crowdsecIntegration,
   crowdsecStatus,
   saveCrowdsecConfig,
   MIDDLEWARE as CROWDSEC_MIDDLEWARE,
@@ -250,6 +251,8 @@ function settingsView() {
     backendTag: c.backendTag,
     /** The proxy host's own Tailscale version, if it could be identified in the tailnet. */
     tailscaleVersion: tailscaleVersion(),
+    /** The CrowdSec integration is on (CROWDSEC_ENABLED). */
+    crowdsec: crowdsecIntegration,
   };
 }
 
@@ -262,6 +265,12 @@ function parseIpRange(raw: string): string | null {
   const bits = Number(prefix);
   if (!/^\d+$/.test(prefix) || bits > (version === 4 ? 32 : 128)) return null;
   return `${ip.toLowerCase()}/${bits}`;
+}
+
+/** Guards the CrowdSec routes: they answer 404 while the integration is off. */
+function requireCrowdsec() {
+  if (!crowdsecIntegration)
+    throw new HttpError(404, "CrowdSec isn't enabled. See the README to turn on the CrowdSec integration.");
 }
 
 async function validateCrowdsec(raw: Record<string, unknown>): Promise<CrowdsecConfig> {
@@ -473,8 +482,12 @@ const server = Bun.serve({
     },
 
     "/api/crowdsec": {
-      GET: handle(async () => json(await crowdsecView())),
+      GET: handle(async () => {
+        requireCrowdsec();
+        return json(await crowdsecView());
+      }),
       PUT: handle(async (req) => {
+        requireCrowdsec();
         saveCrowdsecConfig(await validateCrowdsec(await body(req)));
         return json(await crowdsecView());
       }),
@@ -482,6 +495,7 @@ const server = Bun.serve({
 
     "/api/crowdsec/stats": {
       GET: handle(async (req) => {
+        requireCrowdsec();
         const params = new URL(req.url).searchParams;
         const range = (params.get("range") ?? "24h") as StatsRange;
         if (!(range in RANGES)) throw new HttpError(400, `Range must be one of ${Object.keys(RANGES).join(", ")}`);
@@ -492,6 +506,7 @@ const server = Bun.serve({
     },
     "/api/crowdsec/decisions/:id": {
       DELETE: handle(async (req) => {
+        requireCrowdsec();
         await deleteDecision(parseId(req.params.id));
         return new Response(null, { status: 204 });
       }),

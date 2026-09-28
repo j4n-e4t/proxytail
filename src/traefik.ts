@@ -13,6 +13,24 @@ export const routerName = (h: Pick<ProxyHost, "id">) => `proxytail-host-${h.id}`
 export const CLIENT_CERT_INFO_HEADER = "X-Forwarded-Tls-Client-Cert-Info";
 const DN_FIELDS = { commonName: true, organization: true, serialNumber: true };
 
+const TLS_VERSIONS: Record<string, string> = { "1.2": "VersionTLS12", "1.3": "VersionTLS13" };
+
+/** Minimum TLS version for every service, from TLS_MIN_VERSION ("1.2", the default, or "1.3"). */
+function minTlsVersion() {
+  const raw = (process.env.TLS_MIN_VERSION ?? "").trim() || "1.2";
+  const version = TLS_VERSIONS[raw];
+  if (version) return version;
+  console.error(`Ignoring TLS_MIN_VERSION=${raw}: use 1.2 or 1.3`);
+  return TLS_VERSIONS["1.2"]!;
+}
+
+/**
+ * Settings every TLS option carries. `sniStrict` refuses handshakes for names Traefik has no certificate for, including
+ * none at all, so scanners probing the IP get a refused handshake instead of Traefik's default certificate. A service's
+ * own TLS option replaces the default one rather than extending it, hence both get these.
+ */
+export const TLS_DEFAULTS = { sniStrict: true, minVersion: minTlsVersion() };
+
 /** Dynamic configuration served to Traefik's HTTP provider. */
 export function buildConfig() {
   const routers: Record<string, unknown> = {};
@@ -45,6 +63,7 @@ export function buildConfig() {
       }
       // TLS options apply per SNI hostname, so each service gets its own. caFiles takes PEM content as well as paths.
       tlsOptions[name] = {
+        ...TLS_DEFAULTS,
         clientAuth: {
           caFiles: caPems as string[],
           clientAuthType: h.clientAuth === "require" ? "RequireAndVerifyClientCert" : "VerifyClientCertIfGiven",
@@ -86,13 +105,15 @@ export function buildConfig() {
     services[name] = { loadBalancer };
   }
 
+  // The default TLS option applies to every connection whose SNI no service claims, so it's served even without routes.
+  const tlsConfig = { options: { default: TLS_DEFAULTS, ...tlsOptions } };
   // Traefik rejects an empty `http` element, so omit it entirely when nothing is routed.
-  if (!Object.keys(routers).length) return {};
+  if (!Object.keys(routers).length) return { tls: tlsConfig };
   if (bouncer) middlewares[CROWDSEC_MIDDLEWARE] = bouncer;
   const http: Record<string, unknown> = { routers, services };
   if (Object.keys(serversTransports).length) http.serversTransports = serversTransports;
   if (Object.keys(middlewares).length) http.middlewares = middlewares;
-  return Object.keys(tlsOptions).length ? { http, tls: { options: tlsOptions } } : { http };
+  return { http, tls: tlsConfig };
 }
 
 export interface TraefikStatus {

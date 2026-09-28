@@ -147,12 +147,14 @@ function LoadError({ error, onRetry }: { error: string; onRetry: () => void }) {
 function App() {
   const settings = usePoll(api.settings, 0);
   if (!settings.data) return settings.error ? <LoadError error={settings.error} onRetry={settings.reload} /> : null;
-  return <Console />;
+  return <Console crowdsecEnabled={settings.data.crowdsec} />;
 }
 
-function Console() {
+/** `crowdsecEnabled`: the CrowdSec integration is on, which the server decides on start. */
+function Console({ crowdsecEnabled }: { crowdsecEnabled: boolean }) {
   const [route, navigate] = useRoute();
-  const { page } = route;
+  // Without CrowdSec, there's no Security page to show.
+  const page = route.page === "security" && !crowdsecEnabled ? "services" : route.page;
   const setPage = (p: Page) => navigate(p);
   const { theme, setTheme } = useTheme();
   const hosts = usePoll(api.hosts, 0);
@@ -161,7 +163,10 @@ function Console() {
   const domains = usePoll(api.domains, 0);
   const clientCas = usePoll(api.clientCas, 0);
   const traefik = usePoll(api.traefik, 5000);
-  const crowdsec = usePoll(api.crowdsec, 30_000);
+  const crowdsec = usePoll(
+    useCallback(() => (crowdsecEnabled ? api.crowdsec() : Promise.resolve(null)), [crowdsecEnabled]),
+    crowdsecEnabled ? 30_000 : 0,
+  );
   const devices = usePoll(
     useCallback(() => api.devices(), []),
     30_000,
@@ -216,12 +221,14 @@ function Console() {
             active={page === "peers"}
             onClick={() => setPage("peers")}
           />
-          <NavItem
-            icon={ShieldAlert}
-            label="Security"
-            active={page === "security"}
-            onClick={() => setPage("security")}
-          />
+          {crowdsecEnabled && (
+            <NavItem
+              icon={ShieldAlert}
+              label="Security"
+              active={page === "security"}
+              onClick={() => setPage("security")}
+            />
+          )}
           <NavItem
             icon={SettingsIcon}
             label="Settings"
@@ -255,25 +262,27 @@ function Console() {
               detail={traefik.data?.reachable ? `v${traefik.data.version}` : "Unreachable"}
               title={traefik.data?.error}
             />
-            <ServiceStatus
-              icon={CrowdsecIcon}
-              ok={!!crowdsec.data?.status.lapi.reachable && crowdsec.data.status.lapi.keyAccepted !== false}
-              label="CrowdSec"
-              detail={
-                !crowdsec.data
-                  ? crowdsec.error
-                    ? "Error"
-                    : "…"
-                  : !crowdsec.data.status.lapi.reachable
-                    ? "Unreachable"
-                    : crowdsec.data.status.lapi.keyAccepted === false
-                      ? "Key rejected"
-                      : crowdsec.data.status.metrics?.version
-                        ? `v${crowdsec.data.status.metrics.version}`
-                        : "Connected"
-              }
-              title={crowdsec.data?.status.lapi.error ?? crowdsec.error ?? undefined}
-            />
+            {crowdsecEnabled && (
+              <ServiceStatus
+                icon={CrowdsecIcon}
+                ok={!!crowdsec.data?.status.lapi.reachable && crowdsec.data.status.lapi.keyAccepted !== false}
+                label="CrowdSec"
+                detail={
+                  !crowdsec.data
+                    ? crowdsec.error
+                      ? "Error"
+                      : "…"
+                    : !crowdsec.data.status.lapi.reachable
+                      ? "Unreachable"
+                      : crowdsec.data.status.lapi.keyAccepted === false
+                        ? "Key rejected"
+                        : crowdsec.data.status.metrics?.version
+                          ? `v${crowdsec.data.status.metrics.version}`
+                          : "Connected"
+                }
+                title={crowdsec.data?.status.lapi.error ?? crowdsec.error ?? undefined}
+              />
+            )}
           </div>
           <div className="flex items-center justify-between px-3 pt-2">
             <span className="text-xs text-muted-foreground">Theme</span>
@@ -344,7 +353,7 @@ function Console() {
               onOpenSettings={() => setPage("settings")}
             />
           )}
-          {page === "security" && (
+          {page === "security" && crowdsecEnabled && (
             <SecurityPage
               range={RANGES.find((r) => r.value === route.params.get("range"))?.value ?? "24h"}
               onRange={(r) => navigate(r === "24h" ? "security" : `security?range=${r}`)}

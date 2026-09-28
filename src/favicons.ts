@@ -21,20 +21,62 @@ const inflight = new Map<number, Promise<Favicon | null>>();
 
 const origin = (h: ProxyHost) => `${h.scheme}://${h.targetIp}:${h.targetPort}`;
 
-/** Backends often answer on their IP with a certificate for another name; an icon isn't worth failing over that. */
-function get(url: string, h: ProxyHost) {
-  return fetch(url, {
-    headers: { Host: h.domains[0]!, "User-Agent": "proxytail favicon fetcher" },
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-    tls: { rejectUnauthorized: false },
-  });
+const MAX_REDIRECTS = 3;
+
+/** An href resolved against `base`, pointed at the backend itself: only its path and query are kept. */
+function onBackend(href: string, base: string, h: ProxyHost) {
+  const target = new URL(href, base);
+  return `${origin(h)}${target.pathname}${target.search}`;
 }
 
+/**
+ * GETs a path from the backend. Redirects are followed by hand and only on the backend, like icon links: a Location
+ * naming another host (usually the public hostname) is fetched from the backend too, so a backend can't make proxytail
+ * request anything else, e.g. services on the Docker network or the LAN. Backends often answer on their IP with a
+ * certificate for another name; an icon isn't worth failing over that.
+ */
+async function get(path: string, h: ProxyHost): Promise<Response | null> {
+  const signal = AbortSignal.timeout(TIMEOUT_MS);
+  let url = onBackend(path, `${origin(h)}/`, h);
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    const res = await fetch(url, {
+      headers: { Host: h.domains[0]!, "User-Agent": "proxytail favicon fetcher" },
+      signal,
+      redirect: "manual",
+      tls: { rejectUnauthorized: false },
+    });
+    const location = res.headers.get("location");
+    if (res.status < 300 || res.status >= 400 || !location) return res;
+    await res.body?.cancel();
+    url = onBackend(location, url, h);
+  }
+  return null;
+}
+
+/** The body, or null once it exceeds `max` bytes: it's read in chunks, so a backend can't make proxytail buffer more. */
 async function readCapped(res: Response, max: number): Promise<Uint8Array<ArrayBuffer> | null> {
-  const declared = Number(res.headers.get("content-length"));
-  if (declared > max) return null;
-  const buf = new Uint8Array(await res.arrayBuffer());
-  return buf.byteLength > max ? null : buf;
+  if (Number(res.headers.get("content-length")) > max || !res.body) {
+    await res.body?.cancel();
+    return null;
+  }
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  const reader = res.body.getReader();
+  for (let r = await reader.read(); !r.done; r = await reader.read()) {
+    size += r.value.byteLength;
+    if (size > max) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(r.value);
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
 }
 
 /** `<link rel="icon" href="…">` candidates from the page, best first (SVG/PNG icons, then touch icons). */
@@ -75,10 +117,8 @@ function sniff(b: Uint8Array): string | null {
 
 async function fetchIcon(url: string, h: ProxyHost): Promise<Favicon | null> {
   if (url.startsWith("data:")) return fromDataUri(url);
-  // Absolute links usually point at the public hostname; always fetch from the backend itself.
-  const target = new URL(url, `${origin(h)}/`);
-  const path = target.pathname + target.search;
-  const res = await get(`${origin(h)}${path}`, h).catch(() => null);
+  // Absolute links usually point at the public hostname; get() always fetches from the backend itself.
+  const res = await get(url, h).catch(() => null);
   if (!res?.ok) return null;
   const body = await readCapped(res, MAX_ICON);
   if (!body?.byteLength) return null;
@@ -90,7 +130,7 @@ async function fetchIcon(url: string, h: ProxyHost): Promise<Favicon | null> {
 
 async function discover(h: ProxyHost): Promise<Favicon | null> {
   const candidates: string[] = [];
-  const page = await get(`${origin(h)}/`, h).catch(() => null);
+  const page = await get("/", h).catch(() => null);
   if (page?.ok && (page.headers.get("content-type") ?? "").includes("html")) {
     const html = await readCapped(page, MAX_HTML);
     if (html) candidates.push(...iconLinks(new TextDecoder().decode(html)));

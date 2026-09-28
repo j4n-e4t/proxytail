@@ -98,7 +98,10 @@ export function SettingsPage({
 
   return (
     <div className="max-w-3xl xl:max-w-none">
-      <PageHeader title="Settings" description="Connect proxytail to your tailnet, Traefik and CrowdSec." />
+      <PageHeader
+        title="Settings"
+        description={`Connect proxytail to your tailnet, Traefik${settings.crowdsec ? " and CrowdSec" : ""}.`}
+      />
 
       <div className="grid gap-6 xl:grid-cols-2 xl:items-start">
       <form onSubmit={savePublicAddress} className="xl:col-start-1 xl:row-start-1">
@@ -278,7 +281,7 @@ export function SettingsPage({
         </CardFooter>
       </Card>
 
-      <CrowdsecCard className="xl:col-span-2 xl:row-start-3" />
+      {settings.crowdsec && <CrowdsecCard className="xl:col-span-2 xl:row-start-3" />}
       </div>
     </div>
   );
