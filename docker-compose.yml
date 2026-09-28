@@ -80,7 +80,9 @@ services:
   # The static configuration comes from environment variables rather than flags, so docker-compose.crowdsec.yml can
   # add to it (Traefik reads one source only: flags would have to be repeated in full).
   traefik:
-    image: ${TRAEFIK_IMAGE:-traefik:v3.5}
+    # Current stable line. Older lines (e.g. v3.5) no longer receive the mTLS and request-smuggling fixes shipped to
+    # v3.6.11/v3.7.x, several of which apply to this config.
+    image: ${TRAEFIK_IMAGE:-traefik:v3.7.13}
     restart: unless-stopped
     user: "65532:65532"
     depends_on:
@@ -99,6 +101,12 @@ services:
       TRAEFIK_ENTRYPOINTS_WEB_HTTP_REDIRECTIONS_ENTRYPOINT_SCHEME: https
       TRAEFIK_ENTRYPOINTS_WEB_HTTP_REDIRECTIONS_ENTRYPOINT_PERMANENT: "true"
       TRAEFIK_ENTRYPOINTS_WEBSECURE_ADDRESS: ":8443"
+      # Drop request headers whose name aliases one Traefik manages (e.g. X_Forwarded_Tls_Client_Cert_Info), so a
+      # client can't smuggle a forged value that a CGI/WSGI/PHP/NGINX backend reads as the real header.
+      TRAEFIK_ENTRYPOINTS_WEBSECURE_HTTP_ALIASHEADERSSTRATEGY: delete
+      # Mark conflicting TLS options as an error instead of silently falling back to the (no-client-cert) default,
+      # which would drop a service's mTLS requirement. See Traefik advisory GHSA-g55h-rg46-x9c5.
+      TRAEFIK_CORE_STRICTTLSOPTIONS: "true"
       # Let's Encrypt via the HTTP-01 challenge: every service gets a certificate automatically.
       TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_ACME_HTTPCHALLENGE: "true"
       TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_ACME_HTTPCHALLENGE_ENTRYPOINT: web

@@ -20,7 +20,7 @@ services:
       - traefik-logs:/volumes/traefik-logs
 
   traefik:
-    image: ${TRAEFIK_IMAGE:-traefik:v3.5}
+    image: ${TRAEFIK_IMAGE:-traefik:v3.7.13}
     user: "65532:65532"
     depends_on:
       volume-init:
@@ -49,6 +49,10 @@ services:
       TRAEFIK_ENTRYPOINTS_WEB_HTTP_REDIRECTIONS_ENTRYPOINT_SCHEME: https
       TRAEFIK_ENTRYPOINTS_WEB_HTTP_REDIRECTIONS_ENTRYPOINT_PERMANENT: "true"
       TRAEFIK_ENTRYPOINTS_WEBSECURE_ADDRESS: ":8443"
+      # Drop request headers whose name aliases one Traefik manages, blocking header-spoofing against the backend.
+      TRAEFIK_ENTRYPOINTS_WEBSECURE_HTTP_ALIASHEADERSSTRATEGY: delete
+      # Conflicting TLS options become an error instead of falling back to the no-client-cert default (GHSA-g55h-rg46-x9c5).
+      TRAEFIK_CORE_STRICTTLSOPTIONS: "true"
       # Let's Encrypt via the HTTP-01 challenge. Dev defaults to the staging CA (untrusted certs, generous rate
       # limits) since a dev machine usually isn't reachable from the internet; set ACME_CA_SERVER to override.
       TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_ACME_HTTPCHALLENGE: "true"

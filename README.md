@@ -42,6 +42,8 @@ tailscale serve --bg --https=8443 http://127.0.0.1:3000
   router status from it over the Docker network.
 - Every enabled service receives a Let's Encrypt certificate automatically. Keep port 80 reachable from the internet,
   point each hostname at the public address, and persist the `traefik-acme` volume so certificates survive restarts.
+  Plain HTTP is redirected to HTTPS, and each service is served with a one-year HSTS header so browsers won't fall
+  back to HTTP afterwards.
 - The sidebar shows the versions of Tailscale, Traefik and, if it's on, CrowdSec. For Tailscale, that's the proxy host's client: the
   device whose endpoints include the public address set under **Settings**.
 - Peers come from the Tailscale API through an OAuth client. Create one under **Settings → OAuth clients** in the admin
@@ -198,7 +200,9 @@ at the network layer. That's a deliberate trade-off for personal and homelab set
   host. Grant the people who manage the proxy access to that port, and nobody else.
 - **Browsers can't be abused against it.** A page a tailnet user visits could otherwise make their browser call the
   UI. proxytail rejects unknown `Host` headers, which blocks DNS rebinding, and rejects writes from other origins. It
-  answers to IPs, single-label names, `*.ts.net` and `*.internal` names; add other hostnames to `UI_HOSTS`.
+  answers to IPs, single-label names, `*.ts.net` and `*.internal` names; add other hostnames to `UI_HOSTS`. The UI is
+  also served with `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, so it can't be
+  framed and clickjacked.
 - **Traefik is internet-facing and can reach the UI** over the Docker network (it polls its config there). If Traefik
   is compromised, so is proxytail. On a dedicated proxy host that adds little: whoever controls Traefik can already
   reroute every service and reach everything the host can.

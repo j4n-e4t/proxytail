@@ -314,6 +314,44 @@ async function crowdsecView() {
 
 const port = Number(process.env.PORT ?? 3000);
 
+/**
+ * The UI has no authentication, so a page that frames it could be clickjacked into acting with full access. These
+ * headers forbid framing outright (and stop MIME sniffing / referrer leakage).
+ */
+const SECURITY_HEADERS: Record<string, string> = {
+  "X-Frame-Options": "DENY",
+  "Content-Security-Policy": "frame-ancestors 'none'",
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "no-referrer",
+};
+
+const secured = (b: BodyInit | null, headers: Record<string, string> = {}) =>
+  new Response(b, { headers: { ...headers, ...SECURITY_HEADERS } });
+
+interface BundleFile {
+  path: string;
+  loader: string;
+  isEntry: boolean;
+  headers: Record<string, string>;
+}
+
+/**
+ * Frontend routes that carry SECURITY_HEADERS. Bun's HTML-import route can't set response headers, so in production
+ * (a compiled binary, where `index.files` is populated) proxytail serves the bundle's files itself and adds them.
+ * In development it keeps Bun's native route, so hot reload works; the dev server is loopback-only and not exposed.
+ */
+function pageRoutes(): Record<string, Response | (() => Response) | Bun.HTMLBundle> {
+  const files = (index as { files?: BundleFile[] }).files;
+  const html = files?.find((f) => f.loader === "html" && f.isEntry);
+  if (!files || !html) return { "/*": index };
+  const routes: Record<string, Response | (() => Response)> = {};
+  for (const f of files) {
+    if (f !== html) routes[`/${f.path.split("/").pop()}`] = secured(Bun.file(f.path), f.headers);
+  }
+  // The SPA document, for the root and every client-side route; the asset routes above are matched first.
+  routes["/*"] = () => secured(Bun.file(html.path), { "Content-Type": "text/html;charset=utf-8" });
+  return routes;
+}
 
 const server = Bun.serve({
   port,
@@ -321,7 +359,7 @@ const server = Bun.serve({
   // and publishes the port on the host's loopback only, for `tailscale serve`.
   hostname: process.env.HOST ?? "127.0.0.1",
   routes: {
-    "/*": index,
+    ...pageRoutes(),
 
     "/api/hosts": {
       GET: handle(() => json(hosts.list().map(hostView))),

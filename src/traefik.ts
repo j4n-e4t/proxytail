@@ -7,6 +7,14 @@ const ENTRYPOINTS = ["websecure"];
 const CERT_RESOLVER = "letsencrypt";
 const TRAEFIK_API_URL = process.env.TRAEFIK_API_URL ?? "http://localhost:8080";
 
+/**
+ * HSTS on every service: after the first HTTPS response a browser refuses plain HTTP to that host, closing the
+ * SSL-strip window that Traefik's 80→443 redirect alone leaves open. One year, without includeSubDomains, so a
+ * service never asserts HSTS for sibling names it doesn't control.
+ */
+const HSTS_MIDDLEWARE = "proxytail-hsts";
+const HSTS_SECONDS = 31_536_000;
+
 export const routerName = (h: Pick<ProxyHost, "id">) => `proxytail-host-${h.id}`;
 
 /** Header the verified client certificate's details are forwarded in (URL-encoded, see Traefik's passTLSClientCert). */
@@ -92,7 +100,9 @@ export function buildConfig() {
       };
       chain.push(`${name}-auth`);
     }
-    if (chain.length) router.middlewares = chain;
+    // HSTS applies to every service, whatever else is in the chain.
+    chain.push(HSTS_MIDDLEWARE);
+    router.middlewares = chain;
     routers[name] = router;
     const loadBalancer: Record<string, unknown> = {
       servers: [{ url: `${h.scheme}://${h.targetIp}:${h.targetPort}` }],
@@ -109,6 +119,7 @@ export function buildConfig() {
   const tlsConfig = { options: { default: TLS_DEFAULTS, ...tlsOptions } };
   // Traefik rejects an empty `http` element, so omit it entirely when nothing is routed.
   if (!Object.keys(routers).length) return { tls: tlsConfig };
+  middlewares[HSTS_MIDDLEWARE] = { headers: { stsSeconds: HSTS_SECONDS } };
   if (bouncer) middlewares[CROWDSEC_MIDDLEWARE] = bouncer;
   const http: Record<string, unknown> = { routers, services };
   if (Object.keys(serversTransports).length) http.serversTransports = serversTransports;
