@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { CertSummary } from "./pki";
 
-export const dataDir = process.env.DATA_DIR ?? join(import.meta.dir, "..", "data");
+const dataDir = process.env.DATA_DIR ?? join(import.meta.dir, "..", "data");
 mkdirSync(dataDir, { recursive: true });
 
 export const db = new Database(join(dataDir, "proxytail.db"), { create: true, strict: true });
@@ -50,6 +50,8 @@ db.run(`
 db.run(
   "DELETE FROM settings WHERE key IN ('tailnet', 'ts_api_key', 'ts_oauth_client_id', 'ts_oauth_client_secret')",
 );
+// CrowdSec was replaced by rate limiting.
+db.run("DELETE FROM settings WHERE key LIKE 'crowdsec%'");
 
 db.run(`
   CREATE TABLE IF NOT EXISTS domains (
@@ -374,14 +376,7 @@ export const clientCas = {
   },
 };
 
-export type SettingKey =
-  | "public_address"
-  | "backend_tag"
-  | "crowdsec_enabled"
-  | "crowdsec_cache_seconds"
-  | "crowdsec_trusted_ips"
-  | "crowdsec_machine_id"
-  | "crowdsec_machine_password";
+export type SettingKey = "public_address" | "backend_tag" | "rate_limit";
 
 export const settings = {
   get(key: SettingKey): string | undefined {

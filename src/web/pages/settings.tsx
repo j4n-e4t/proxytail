@@ -9,7 +9,7 @@ import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/page-header";
 import { ToneBadge } from "@/components/status";
 import { api, type Settings, type TraefikStatus } from "@/lib/api";
-import { CrowdsecCard } from "@/pages/crowdsec-settings";
+import { RateLimitCard } from "@/pages/rate-limit-settings";
 
 function Field(props: { id: string; label: string; hint?: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -98,10 +98,7 @@ export function SettingsPage({
 
   return (
     <div className="max-w-3xl xl:max-w-none">
-      <PageHeader
-        title="Settings"
-        description={`Connect proxytail to your tailnet, Traefik${settings.crowdsec ? " and CrowdSec" : ""}.`}
-      />
+      <PageHeader title="Settings" description="Connect proxytail to your tailnet and Traefik, and limit request rates." />
 
       <div className="grid gap-6 xl:grid-cols-2 xl:items-start">
       <form onSubmit={savePublicAddress} className="xl:col-start-1 xl:row-start-1">
@@ -281,7 +278,7 @@ export function SettingsPage({
         </CardFooter>
       </Card>
 
-      {settings.crowdsec && <CrowdsecCard className="xl:col-span-2 xl:row-start-3" />}
+      <RateLimitCard className="xl:col-span-2 xl:row-start-3" />
       </div>
     </div>
   );

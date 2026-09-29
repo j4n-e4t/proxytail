@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  Database,
   Globe,
   Monitor,
   MonitorSmartphone,
   Moon,
   RefreshCw,
   Settings as SettingsIcon,
-  ShieldAlert,
   ShieldCheck,
   Sun,
   Waypoints,
@@ -18,7 +18,7 @@ import { Card, CardDescription, CardFooter, CardHeader, CardTitle } from "@/comp
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { CrowdsecIcon, TailscaleIcon, TraefikIcon } from "@/components/brand-icons";
+import { TailscaleIcon, TraefikIcon } from "@/components/brand-icons";
 import { StatusDot } from "@/components/status";
 import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
@@ -26,15 +26,14 @@ import { useTheme, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ClientCasPage } from "@/pages/client-cas";
 import { PeersPage } from "@/pages/peers";
-import { RANGES, SecurityPage } from "@/pages/security";
 import { ServiceEditorDialog } from "@/pages/service-editor";
 import { DomainsPage } from "@/pages/domains";
 import { HostsPage } from "@/pages/hosts";
 import { SettingsPage } from "@/pages/settings";
 import "./globals.css";
 
-type Page = "services" | "domains" | "client-cas" | "peers" | "security" | "settings";
-const PAGES: Page[] = ["services", "domains", "client-cas", "peers", "security", "settings"];
+type Page = "services" | "domains" | "client-cas" | "peers" | "settings";
+const PAGES: Page[] = ["services", "domains", "client-cas", "peers", "settings"];
 
 interface Route {
   page: Page;
@@ -147,14 +146,12 @@ function LoadError({ error, onRetry }: { error: string; onRetry: () => void }) {
 function App() {
   const settings = usePoll(api.settings, 0);
   if (!settings.data) return settings.error ? <LoadError error={settings.error} onRetry={settings.reload} /> : null;
-  return <Console crowdsecEnabled={settings.data.crowdsec} />;
+  return <Console />;
 }
 
-/** `crowdsecEnabled`: the CrowdSec integration is on, which the server decides on start. */
-function Console({ crowdsecEnabled }: { crowdsecEnabled: boolean }) {
+function Console() {
   const [route, navigate] = useRoute();
-  // Without CrowdSec, there's no Security page to show.
-  const page = route.page === "security" && !crowdsecEnabled ? "services" : route.page;
+  const page = route.page;
   const setPage = (p: Page) => navigate(p);
   const { theme, setTheme } = useTheme();
   const hosts = usePoll(api.hosts, 0);
@@ -163,10 +160,8 @@ function Console({ crowdsecEnabled }: { crowdsecEnabled: boolean }) {
   const domains = usePoll(api.domains, 0);
   const clientCas = usePoll(api.clientCas, 0);
   const traefik = usePoll(api.traefik, 5000);
-  const crowdsec = usePoll(
-    useCallback(() => (crowdsecEnabled ? api.crowdsec() : Promise.resolve(null)), [crowdsecEnabled]),
-    crowdsecEnabled ? 30_000 : 0,
-  );
+  const rateLimit = usePoll(api.rateLimit, 30_000);
+  const valkey = rateLimit.data?.config.enabled && rateLimit.data.config.store === "valkey" ? rateLimit.data.valkey : null;
   const devices = usePoll(
     useCallback(() => api.devices(), []),
     30_000,
@@ -221,14 +216,6 @@ function Console({ crowdsecEnabled }: { crowdsecEnabled: boolean }) {
             active={page === "peers"}
             onClick={() => setPage("peers")}
           />
-          {crowdsecEnabled && (
-            <NavItem
-              icon={ShieldAlert}
-              label="Security"
-              active={page === "security"}
-              onClick={() => setPage("security")}
-            />
-          )}
           <NavItem
             icon={SettingsIcon}
             label="Settings"
@@ -262,25 +249,14 @@ function Console({ crowdsecEnabled }: { crowdsecEnabled: boolean }) {
               detail={traefik.data?.reachable ? `v${traefik.data.version}` : "Unreachable"}
               title={traefik.data?.error}
             />
-            {crowdsecEnabled && (
+            {/* Only while rate limiting counts in Valkey. */}
+            {valkey && (
               <ServiceStatus
-                icon={CrowdsecIcon}
-                ok={!!crowdsec.data?.status.lapi.reachable && crowdsec.data.status.lapi.keyAccepted !== false}
-                label="CrowdSec"
-                detail={
-                  !crowdsec.data
-                    ? crowdsec.error
-                      ? "Error"
-                      : "…"
-                    : !crowdsec.data.status.lapi.reachable
-                      ? "Unreachable"
-                      : crowdsec.data.status.lapi.keyAccepted === false
-                        ? "Key rejected"
-                        : crowdsec.data.status.metrics?.version
-                          ? `v${crowdsec.data.status.metrics.version}`
-                          : "Connected"
-                }
-                title={crowdsec.data?.status.lapi.error ?? crowdsec.error ?? undefined}
+                icon={Database}
+                ok={valkey.reachable && !valkey.error}
+                label={valkey.server ?? "Valkey"}
+                detail={!valkey.reachable ? "Unreachable" : valkey.error ? "Error" : valkey.version ? `v${valkey.version}` : "Connected"}
+                title={valkey.error}
               />
             )}
           </div>
@@ -351,15 +327,6 @@ function Console({ crowdsecEnabled }: { crowdsecEnabled: boolean }) {
               onRefresh={async () => devices.setData(await api.devices(true))}
               onExpose={(d) => navigate(`services/new?peer=${encodeURIComponent(d.id)}`)}
               onOpenSettings={() => setPage("settings")}
-            />
-          )}
-          {page === "security" && crowdsecEnabled && (
-            <SecurityPage
-              range={RANGES.find((r) => r.value === route.params.get("range"))?.value ?? "24h"}
-              onRange={(r) => navigate(r === "24h" ? "security" : `security?range=${r}`)}
-              crowdsec={crowdsec.data}
-              onOpenSettings={() => setPage("settings")}
-              onOpenService={(id) => navigate(`services/${id}`)}
             />
           )}
           {page === "settings" && settings.data && (

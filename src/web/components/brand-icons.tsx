@@ -1,5 +1,4 @@
 import type { SVGProps } from "react";
-import crowdsecLogo from "@/assets/crowdsec.webp";
 
 // From selfh.st/icons (https://github.com/selfhst/icons).
 
@@ -20,7 +19,3 @@ export function TraefikIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
-/** A raster logo: selfh.st only has CrowdSec as an image. */
-export function CrowdsecIcon(props: { className?: string }) {
-  return <img src={crowdsecLogo} alt="" aria-hidden className={props.className} />;
-}

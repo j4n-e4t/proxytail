@@ -13,8 +13,7 @@ browser ──► app.example.com ──► Traefik ──► host's tailscale0 
 
 - **proxytail** (Bun + SQLite + React, shadcn/ui on Tailwind v4) stores your domains and services, lists tailnet peers
   through the Tailscale API, and serves Traefik's dynamic configuration.
-- **CrowdSec** (optional) reads Traefik's access log, bans IPs that scan or attack your services, and answers
-  Traefik's bouncer plugin. See [CrowdSec](#crowdsec).
+- **Valkey** optionally keeps the counters for per-client [rate limiting](#rate-limiting).
 - **Traefik** and proxytail run as containers on a private Docker network, on a dedicated proxy host that is itself on
   your tailnet. Traefik reaches peers through the host's Tailscale, and proxytail's UI is only published on the host's
   loopback, for `tailscale serve`.
@@ -29,7 +28,7 @@ tailscaled running in kernel mode (the default outside containers), so container
 
 ```sh
 cp .env.example .env    # set TS_OAUTH_CLIENT_ID and TS_OAUTH_CLIENT_SECRET
-docker compose up -d    # proxytail and Traefik (CrowdSec is opt-in, see below)
+docker compose up -d    # proxytail, Traefik and Valkey
 tailscale serve --bg --https=8443 http://127.0.0.1:3000
 ```
 
@@ -44,11 +43,11 @@ tailscale serve --bg --https=8443 http://127.0.0.1:3000
   point each hostname at the public address, and persist the `traefik-acme` volume so certificates survive restarts.
   Plain HTTP is redirected to HTTPS, and each service is served with a one-year HSTS header so browsers won't fall
   back to HTTP afterwards.
-- The sidebar shows the versions of Tailscale, Traefik and, if it's on, CrowdSec. For Tailscale, that's the proxy host's client: the
-  device whose endpoints include the public address set under **Settings**.
+- The sidebar shows the versions of Tailscale and Traefik, and of Valkey while rate limiting uses it. For Tailscale,
+  that's the proxy host's client: the device whose endpoints include the public address set under **Settings**.
 - Peers come from the Tailscale API through an OAuth client. Create one under **Settings → OAuth clients** in the admin
   console with only the `devices:core:read` scope: a leaked secret then exposes your device list and nothing else.
-- proxytail and Traefik run as unprivileged users, read-only and without capabilities. See [Hardening](#hardening).
+- All containers run as unprivileged users, read-only and without capabilities. See [Hardening](#hardening).
 - Pin a release with `PROXYTAIL_IMAGE=ghcr.io/j4n-e4t/proxytail:0.1.0`, or build locally with
   `docker compose up -d --build`.
 
@@ -60,7 +59,8 @@ Then, in the UI:
    verified against public DNS resolvers.
 3. **Services:** pick a subdomain, a tailnet peer, and a port. The route goes live within about 5 seconds.
 4. Optionally, **Client CAs:** require client certificates for a service. See [Client certificates (mTLS)](#client-certificates-mtls).
-5. Optionally, add CrowdSec and block the IPs it bans under **Settings → CrowdSec**. See [CrowdSec](#crowdsec).
+5. Optionally, **Settings → Rate limiting:** limit how many requests each client IP can make. See
+   [Rate limiting](#rate-limiting).
 
 Only peers tagged `tag:proxytail-backend` are listed and can be targeted. Change the tag under **Settings** or with
 `TS_BACKEND_TAG`. Define the tag under `tagOwners` in your tailnet policy and apply it to each backend, e.g.
@@ -100,13 +100,13 @@ certificates.
   need TLS 1.2 or newer; set `TLS_MIN_VERSION=1.3` to require TLS 1.3. proxytail puts both into Traefik's default TLS
   option and into every service's own option (for client certificates), because a service's option replaces the
   default rather than extending it.
-- **Unprivileged containers:** proxytail and Traefik run as user 65532 with a read-only filesystem, no capabilities
+- **Unprivileged containers:** proxytail and Traefik run as user 65532 (Valkey as its image's `valkey` user) with a read-only filesystem, no capabilities
   and `no-new-privileges`. Traefik listens on 8000 and 8443 inside its container, and Docker publishes them on
   `HTTP_PORT` and `HTTPS_PORT`. A one-shot `volume-init` container hands Traefik's volumes to its user, including
   volumes a root Traefik created before.
 - **Traefik's API** is only reachable on the Docker network, and its dashboard is off. Traefik doesn't check for new
   versions or send usage statistics, and Docker checks its health through `/ping`.
-- **Resources:** every container has a memory limit (`APP_MEM_LIMIT`, `TRAEFIK_MEM_LIMIT`, `CROWDSEC_MEM_LIMIT`) and
+- **Resources:** every container has a memory limit (`APP_MEM_LIMIT`, `TRAEFIK_MEM_LIMIT`) and
   a process limit, and Docker rotates their logs at 10 MB (3 files).
 - **Favicons:** proxytail fetches service icons from the backend itself. It follows redirects only on the backend (a
   `Location` naming another host is fetched from the backend too) and stops reading a response past its size limit.
@@ -114,7 +114,7 @@ certificates.
 ## Migrating from main
 
 The `crowdsec` branch isn't published to GHCR yet, so the migration builds the app on the proxy host.
-`scripts/migrate-from-main.sh` moves a running `main` stack over with CrowdSec off. Your services, domains, client CAs,
+`scripts/migrate-from-main.sh` moves a running `main` stack over. Your services, domains, client CAs,
 settings and Let's Encrypt certificates stay in the same volumes: the database schema is unchanged, and nothing is
 reissued.
 
@@ -126,7 +126,7 @@ scripts/migrate-from-main.sh
 
 It stops before touching the running stack if anything is missing, and then:
 
-1. builds the app as `proxytail:crowdsec` and pulls Traefik while `main` keeps serving;
+1. builds the app as `proxytail:crowdsec` and pulls Traefik and Valkey while `main` keeps serving;
 2. stops the stack and backs up both volumes to `backups/proxytail-<time>.tar.gz`;
 3. saves `.env` as `.env.pre-migration` and sets `PROXYTAIL_IMAGE=proxytail:crowdsec`, so a later
    `docker compose pull` can't swap `main`'s image back in (`docker compose pull` then fails for the app; update it
@@ -135,61 +135,37 @@ It stops before touching the running stack if anything is missing, and then:
 5. waits for both containers to be healthy, and prints the state of Traefik's routers.
 
 Services are down for the few seconds the containers are recreated. Afterwards, clients that send no hostname (SNI)
-get no TLS connection (see [Hardening](#hardening)). CrowdSec stays off until you add it (see [CrowdSec](#crowdsec)).
+get no TLS connection (see [Hardening](#hardening)). Rate limiting stays off until you turn it on (see
+[Rate limiting](#rate-limiting)).
 
 To go back, run `scripts/migrate-from-main.sh rollback` **before** leaving the branch. It stops the stack, hands the
 certificates back to root, which `main`'s Traefik runs as, and restores `.env`. Then run
 `git checkout main && docker compose up -d --remove-orphans`. If the data itself needs restoring, the backup holds
 `data/` and `letsencrypt/`, the contents of the `proxytail_proxytail-data` and `proxytail_traefik-acme` volumes.
 
-## CrowdSec
+## Rate limiting
 
-[CrowdSec](https://www.crowdsec.net) is opt-in. It reads Traefik's access log, detects scanners, brute force
-and known CVE probes (the `crowdsecurity/traefik` and `crowdsecurity/http-cve` collections), and bans the source IPs.
-It also receives the community blocklist.
+Rate limiting is off until you turn on **Limit requests** under **Settings → Rate limiting**. Then every service gets
+Traefik's [rateLimit](https://doc.traefik.io/traefik/middlewares/http/ratelimit/) middleware as its first middleware,
+before basic auth, so it also slows down password guessing. Requests over the limit get `429 Too Many Requests` with a
+`Retry-After` header.
 
-To add it, uncomment `COMPOSE_FILE=docker-compose.yml:docker-compose.crowdsec.yml` in `.env` and run
-`docker compose up -d`. That adds CrowdSec and a log rotation container, turns on Traefik's access log and bouncer
-plugin, and shows the **Security** page and **Settings → CrowdSec** in the UI. To go back to plain Traefik, comment it
-out again and run `docker compose up -d --remove-orphans`: proxytail stops adding the bouncer, even if blocking was on,
-and the CrowdSec volumes are kept for later.
-
-Once it's added, detection always runs. Blocking is off until you turn on **Block banned IPs** under **Settings → CrowdSec**. Then every
-service gets Traefik's [CrowdSec bouncer plugin](https://plugins.traefik.io/plugins/6335346ca4caa9ddeffda116/crowdsec-bouncer-traefik-plugin)
-as its first middleware, before basic auth. Banned IPs get a `403`.
-
-- **Live mode:** the bouncer asks CrowdSec's Local API about each client IP and caches a clean answer for 60 seconds
-  (**Cache clean IPs for**). A new ban can take that long to apply to an IP that was just seen.
-- **Fail closed:** while the Local API is unreachable, every request from an IP that isn't cached as clean is blocked.
-  proxytail refuses to turn blocking on while CrowdSec is unreachable or rejects the key.
-- **Never block:** IPs and CIDR ranges that skip the check, e.g. your home connection. CrowdSec's detection also ignores
-  private addresses.
-- **Secrets:** proxytail generates two on first start in the `crowdsec-secrets` volume, which CrowdSec and Traefik
-  mount read-only:
-  - the **bouncer key**. CrowdSec registers it as the bouncer `traefik`, and Traefik reads it from the file, so it
-    never appears in Traefik's API. CrowdSec only registers a key it doesn't know yet. If the settings show **Key
-    rejected**, e.g. after recreating one volume but not the other, run
-    `docker compose exec crowdsec cscli bouncers delete traefik` and `docker compose restart crowdsec`.
-  - an **auto-registration token**. proxytail uses it to register itself as a CrowdSec machine (`proxytail-<random>`)
-    the first time it needs to. A machine can read alerts, which the Security page is built from, and lift bans. The
-    token only works from private addresses.
-- **Access log:** Traefik writes JSON to the `traefik-logs` volume, and the `logrotate` container truncates it past
-  100 MB.
-- **Client IPs** must reach Traefik unchanged. Docker's published ports keep IPv4 source addresses, but if the access
-  log shows a Docker gateway address (`172.x`, `192.168.x`) instead, CrowdSec can't tell clients apart.
-- **Traefik fetches the plugin** from plugins.traefik.io on every start (`CROWDSEC_BOUNCER_VERSION`). If that fails
-  while blocking is on, Traefik doesn't route your services, and the settings show the error.
-- Use `cscli` for anything else, e.g. `docker compose exec crowdsec cscli decisions list` or `cscli alerts list`.
-
-The **Security** page shows what CrowdSec detected over the last 24 hours, 7 days or 30 days:
-
-- alerts, attacking IPs and active bans, plus the size of the community blocklist;
-- alerts over time, and the top scenarios, targeted services, countries and networks;
-- active bans, which you can lift with **Unban**, and the latest alerts with the paths the attacker requested.
-
-It only covers CrowdSec's own detections and `cscli` bans, not the community blocklist. Alerts are attributed to
-services by hostname: the stack adds `target_fqdn` to CrowdSec's alert context. A lifted ban can take up to the
-**Cache clean IPs for** duration to reach Traefik, because the bouncer caches bans for that long too.
+- **Per client IP and service:** each service has its own middleware, so a client that hits the limit on one service
+  can still use the others. Clients are told apart by their address as Traefik sees it. Docker's published ports keep
+  IPv4 source addresses, but if Traefik's access log shows a Docker gateway address (`172.x`, `192.168.x`) instead,
+  every client shares one budget.
+- **Average and burst:** a client can make **Burst** requests at once, e.g. when a page loads its scripts and images,
+  and then keep up the **Average** per second, minute or hour. The defaults, 20 per second with a burst of 100, only
+  stop floods.
+- **Where requests are counted:**
+  - **Traefik** keeps the counters in its own memory. Nothing else runs, but Traefik rebuilds its middlewares whenever
+    the configuration changes, i.e. whenever you change a service, and on restart, and the counts start over.
+  - **Valkey** keeps them in the `valkey` container, so they survive configuration changes and Traefik restarts. It
+    only holds short-lived counters, so it writes nothing to disk and is capped at 32 MB. proxytail refuses
+    to switch to Valkey while it can't reach it.
+- **Fallback:** Traefik answers `500` to every request it can't count in Valkey. proxytail checks Valkey every
+  5 seconds, and while it's down, it switches the middlewares to Traefik's memory until it's back. The settings show
+  **Fallback** meanwhile.
 
 ## Security model
 
@@ -224,10 +200,7 @@ at the network layer. That's a deliberate trade-off for personal and homelab set
 
 - **Traefik's API is unauthenticated** (routers, services, basic auth hashes), so it's only reachable on the Docker
   network, like `/api/traefik/config`.
-- **CrowdSec's Local API and metrics** are only reachable on the Docker network too. The bouncer key only allows
-  reading decisions. proxytail's machine account can also create and delete them; its password stays in proxytail's
-  database. Anyone who can read the `crowdsec-secrets` volume can register a machine of their own. CrowdSec shares the IPs it bans with the CrowdSec network in exchange for the community
-  blocklist.
+- **Valkey has no password** and is only reachable on the Docker network. It only holds rate limit counters.
 
 Traefik can reach the internet (it needs to for Let's Encrypt), and it holds the certificates and basic auth hashes it
 serves. Client CAs are stored as certificates only, without keys, so neither proxytail nor Traefik can mint client
@@ -248,11 +221,8 @@ docker compose -f docker-compose.dev.yml up -d  # Traefik, pointed at the app on
 - `docker compose -f docker-compose.dev.yml --profile demo up -d` adds an ephemeral `proxytail-demo` peer running
   `demo/server.ts` on port 80, which is useful as a first target. Like `traefik/whoami`, it echoes each request, as a
   page with its own favicon.
-- `docker compose -f docker-compose.dev.yml --profile crowdsec up -d` adds CrowdSec; set `CROWDSEC_ENABLED=true` for
-  the app. Its Local API and metrics are published on `127.0.0.1:8081` and `127.0.0.1:6060` for the app on the host
-  (`CROWDSEC_LAPI_URL`, `CROWDSEC_METRICS_URL`). The app writes its CrowdSec secrets to `data/crowdsec/`, which Traefik
-  and CrowdSec mount. Start the app before CrowdSec: CrowdSec restarts until the registration token exists. The dev
-  Traefik always loads the bouncer plugin.
+- The dev stack includes Valkey, published on `127.0.0.1:6379` for the app on the host (`VALKEY_ADDR`). Traefik
+  reaches it as `valkey:6379` (`VALKEY_TRAEFIK_ADDR`).
 - To develop without a tailnet, set `TS_MOCK_DEVICES=/path/devices.json`. The file uses the Tailscale API's
   `{ "devices": [...] }` format.
 - `bun run build` compiles the server and the bundled frontend into a single executable, `dist/proxytail`. On macOS,
@@ -275,4 +245,4 @@ SSO/forward-auth for proxied services.
 
 ## Credits
 
-The Tailscale, Traefik and CrowdSec icons are from [selfh.st/icons](https://github.com/selfhst/icons) (CC BY 4.0).
+The Tailscale and Traefik icons are from [selfh.st/icons](https://github.com/selfhst/icons) (CC BY 4.0).

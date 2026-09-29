@@ -1,17 +1,6 @@
 import { SQLiteError } from "bun:sqlite";
-import { isIP } from "node:net";
 import index from "./web/index.html";
 import { checkBrowserOrigin } from "./guard";
-import { crowdsecStats, deleteDecision, RANGES, type StatsRange } from "./crowdsec-stats";
-import {
-  CrowdsecError,
-  crowdsecConfig,
-  crowdsecIntegration,
-  crowdsecStatus,
-  saveCrowdsecConfig,
-  MIDDLEWARE as CROWDSEC_MIDDLEWARE,
-  type CrowdsecConfig,
-} from "./crowdsec";
 import {
   clientCas,
   domains as domainStore,
@@ -27,6 +16,14 @@ import { checkDomain, detectPublicIp, publicAddress, requiredRecord } from "./dn
 import { faviconFor } from "./favicons";
 import { parseCaBundle, PkiError } from "./pki";
 import {
+  activeStore,
+  PERIODS,
+  rateLimitConfig,
+  saveRateLimitConfig,
+  valkeyStatus,
+  type RateLimitConfig,
+} from "./ratelimit";
+import {
   clearDeviceCache,
   deviceSource,
   isConfigured,
@@ -36,7 +33,7 @@ import {
   tailscaleVersion,
   TailscaleError,
 } from "./tailscale";
-import { buildConfig, middlewareStatus, traefikStatus } from "./traefik";
+import { buildConfig, rateLimitStatus, traefikStatus } from "./traefik";
 
 class HttpError extends Error {
   constructor(
@@ -57,8 +54,7 @@ function handle<T extends Request>(fn: (req: T) => Promise<Response> | Response)
       if (rejected) throw new HttpError(403, rejected);
       return await fn(req);
     } catch (e) {
-      if (e instanceof HttpError || e instanceof TailscaleError || e instanceof CrowdsecError)
-        return json({ error: e.message }, e.status);
+      if (e instanceof HttpError || e instanceof TailscaleError) return json({ error: e.message }, e.status);
       if (e instanceof PkiError) return json({ error: e.message }, 400);
       console.error(e);
       return json({ error: "Internal server error" }, 500);
@@ -251,65 +247,43 @@ function settingsView() {
     backendTag: c.backendTag,
     /** The proxy host's own Tailscale version, if it could be identified in the tailnet. */
     tailscaleVersion: tailscaleVersion(),
-    /** The CrowdSec integration is on (CROWDSEC_ENABLED). */
-    crowdsec: crowdsecIntegration,
   };
 }
 
-/** An IP address or CIDR range, normalized; null if invalid. */
-function parseIpRange(raw: string): string | null {
-  const [ip = "", prefix, ...rest] = raw.split("/");
-  const version = isIP(ip);
-  if (!version || rest.length) return null;
-  if (prefix === undefined) return ip.toLowerCase();
-  const bits = Number(prefix);
-  if (!/^\d+$/.test(prefix) || bits > (version === 4 ? 32 : 128)) return null;
-  return `${ip.toLowerCase()}/${bits}`;
+/** A request count between 1 and 100,000. */
+function parseCount(raw: unknown, label: string) {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 100_000) throw new HttpError(400, `${label} must be between 1 and 100,000`);
+  return n;
 }
 
-/** Guards the CrowdSec routes: they answer 404 while the integration is off. */
-function requireCrowdsec() {
-  if (!crowdsecIntegration)
-    throw new HttpError(404, "CrowdSec isn't enabled. See the README to turn on the CrowdSec integration.");
-}
-
-async function validateCrowdsec(raw: Record<string, unknown>): Promise<CrowdsecConfig> {
-  const current = crowdsecConfig();
-  const cacheSeconds = raw.cacheSeconds === undefined ? current.cacheSeconds : Number(raw.cacheSeconds);
-  if (!Number.isInteger(cacheSeconds) || cacheSeconds < 1 || cacheSeconds > 3600)
-    throw new HttpError(400, "The cache duration must be between 1 and 3600 seconds");
-  const rawIps = raw.trustedIps === undefined ? current.trustedIps : raw.trustedIps;
-  const trustedIps: string[] = [];
-  for (const entry of Array.isArray(rawIps) ? rawIps : String(rawIps ?? "").split(/[\s,]+/)) {
-    const text = String(entry).trim();
-    if (!text) continue;
-    const range = parseIpRange(text);
-    if (!range) throw new HttpError(400, `Invalid IP address or range: ${text}`);
-    if (!trustedIps.includes(range)) trustedIps.push(range);
-  }
-  const enabled = raw.enabled === undefined ? current.enabled : !!raw.enabled;
-  // Traefik blocks every request LAPI can't answer, so don't switch it on blind.
-  if (enabled && !current.enabled) {
-    const { key, lapi } = await crowdsecStatus();
-    if (!key) throw new HttpError(400, "proxytail has no bouncer key. Check that its CrowdSec key file is writable.");
-    if (!lapi.reachable) throw new HttpError(400, `CrowdSec is unreachable: ${lapi.error}`);
-    if (!lapi.keyAccepted)
-      throw new HttpError(400, lapi.error ?? "CrowdSec rejected the bouncer key. See the README to re-register it.");
-  }
-  return {
-    enabled,
-    cacheSeconds,
-    trustedIps,
+async function validateRateLimit(raw: Record<string, unknown>): Promise<RateLimitConfig> {
+  const current = rateLimitConfig();
+  const next: RateLimitConfig = {
+    enabled: raw.enabled === undefined ? current.enabled : !!raw.enabled,
+    store: (raw.store ?? current.store) as RateLimitConfig["store"],
+    average: parseCount(raw.average ?? current.average, "The average"),
+    period: (raw.period ?? current.period) as RateLimitConfig["period"],
+    burst: parseCount(raw.burst ?? current.burst, "The burst"),
   };
+  if (next.store !== "memory" && next.store !== "valkey") throw new HttpError(400, "Store must be memory or valkey");
+  if (!Object.hasOwn(PERIODS, next.period)) throw new HttpError(400, `Period must be one of ${Object.keys(PERIODS).join(", ")}`);
+  // Don't switch to a Valkey that isn't there: Traefik would only ever use the in-memory fallback.
+  if (next.enabled && next.store === "valkey" && !(current.enabled && current.store === "valkey")) {
+    const valkey = await valkeyStatus();
+    if (!valkey.reachable) throw new HttpError(400, `Valkey is unreachable at ${valkey.addr}: ${valkey.error}`);
+    if (valkey.error) throw new HttpError(400, `Valkey refused proxytail's check: ${valkey.error}`);
+  }
+  return next;
 }
 
-async function crowdsecView() {
-  const config = crowdsecConfig();
-  const [status, middleware] = await Promise.all([
-    crowdsecStatus(),
-    config.enabled ? middlewareStatus(CROWDSEC_MIDDLEWARE) : null,
+async function rateLimitView() {
+  const config = rateLimitConfig();
+  const [valkey, traefik] = await Promise.all([
+    config.store === "valkey" ? valkeyStatus() : null,
+    config.enabled ? rateLimitStatus() : null,
   ]);
-  return { config, status, middleware };
+  return { config, activeStore: config.enabled ? activeStore(config) : null, valkey, traefik };
 }
 
 const port = Number(process.env.PORT ?? 3000);
@@ -519,34 +493,11 @@ const server = Bun.serve({
       }),
     },
 
-    "/api/crowdsec": {
-      GET: handle(async () => {
-        requireCrowdsec();
-        return json(await crowdsecView());
-      }),
+    "/api/rate-limit": {
+      GET: handle(async () => json(await rateLimitView())),
       PUT: handle(async (req) => {
-        requireCrowdsec();
-        saveCrowdsecConfig(await validateCrowdsec(await body(req)));
-        return json(await crowdsecView());
-      }),
-    },
-
-    "/api/crowdsec/stats": {
-      GET: handle(async (req) => {
-        requireCrowdsec();
-        const params = new URL(req.url).searchParams;
-        const range = (params.get("range") ?? "24h") as StatsRange;
-        if (!(range in RANGES)) throw new HttpError(400, `Range must be one of ${Object.keys(RANGES).join(", ")}`);
-        const offset = Number(params.get("utcOffset") ?? 0);
-        if (!Number.isInteger(offset) || Math.abs(offset) > 14 * 60) throw new HttpError(400, "Invalid UTC offset");
-        return json(await crowdsecStats(range, offset, params.has("fresh")));
-      }),
-    },
-    "/api/crowdsec/decisions/:id": {
-      DELETE: handle(async (req) => {
-        requireCrowdsec();
-        await deleteDecision(parseId(req.params.id));
-        return new Response(null, { status: 204 });
+        await saveRateLimitConfig(await validateRateLimit(await body(req)));
+        return json(await rateLimitView());
       }),
     },
 

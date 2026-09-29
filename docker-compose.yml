@@ -3,8 +3,6 @@
 #   docker compose up -d   # pulls ghcr.io/j4n-e4t/proxytail (or `--build` to build locally)
 #   tailscale serve --bg --https=8443 http://127.0.0.1:3000   # publish the UI on the tailnet
 #
-# CrowdSec is opt-in: docker-compose.crowdsec.yml adds it on top of this file (see COMPOSE_FILE in .env.example).
-#
 # There is no login: whoever can reach the UI has full access. It's only published on the host's loopback, and
 # `tailscale serve` puts it on the tailnet, where the tailnet policy decides who can reach it.
 # Traefik reaches tailnet peers through the host's routing table, i.e. the host's tailscale0.
@@ -28,6 +26,7 @@ services:
       TRAEFIK_API_URL: http://traefik:8080
       TRAEFIK_TLS_ADDR: traefik:8443
       TLS_MIN_VERSION: ${TLS_MIN_VERSION:-1.2}
+      VALKEY_ADDR: valkey:6379
       TS_OAUTH_CLIENT_ID: ${TS_OAUTH_CLIENT_ID:-}
       TS_OAUTH_CLIENT_SECRET: ${TS_OAUTH_CLIENT_SECRET:-}
       TS_TAILNET: ${TS_TAILNET:-}
@@ -50,7 +49,6 @@ services:
     logging: *logging
 
   # Hands Traefik's volumes to its unprivileged user (65532), including volumes a root Traefik created before (main).
-  # docker-compose.crowdsec.yml mounts the access log volume under /volumes too.
   volume-init:
     image: busybox:1.37
     restart: "no"
@@ -77,8 +75,8 @@ services:
   # Runs as an unprivileged user (65532) instead of the image's root. It listens on unprivileged ports, so it needs no
   # capabilities at all; Docker publishes them on 80 and 443.
   #
-  # The static configuration comes from environment variables rather than flags, so docker-compose.crowdsec.yml can
-  # add to it (Traefik reads one source only: flags would have to be repeated in full).
+  # The static configuration comes from environment variables rather than flags, so an override file can add to it
+  # (Traefik reads one source only: flags would have to be repeated in full).
   traefik:
     # Current stable line. Older lines (e.g. v3.5) no longer receive the mTLS and request-smuggling fixes shipped to
     # v3.6.11/v3.7.x, several of which apply to this config.
@@ -124,7 +122,7 @@ services:
       TRAEFIK_PROVIDERS_HTTP_ENDPOINT: http://app:3000/api/traefik/config
       TRAEFIK_PROVIDERS_HTTP_POLLINTERVAL: 5s
       TRAEFIK_LOG_LEVEL: INFO
-      # Access log on stdout, rotated by Docker (docker-compose.crowdsec.yml sends it to a file for CrowdSec).
+      # Access log on stdout, rotated by Docker.
       TRAEFIK_ACCESSLOG: "true"
     volumes:
       - traefik-acme:/letsencrypt
@@ -141,6 +139,39 @@ services:
       - no-new-privileges:true
     mem_limit: ${TRAEFIK_MEM_LIMIT:-512m}
     pids_limit: 512
+    logging: *logging
+
+  # Keeps the rate limit counters when Valkey is chosen under Settings → Rate limiting. Only reachable on the Docker
+  # network. The counters are short-lived, so nothing is written to disk, and memory is capped.
+  valkey:
+    image: valkey/valkey:${VALKEY_VERSION:-9.1}-alpine
+    restart: unless-stopped
+    command:
+      - valkey-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 32mb
+      - --maxmemory-policy
+      - allkeys-lru
+    # The image's valkey user; running as it skips the entrypoint's chown and privilege drop.
+    user: "999:1000"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    read_only: true
+    tmpfs:
+      - /data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+    pids_limit: 64
     logging: *logging
 
 volumes:

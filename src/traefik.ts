@@ -1,6 +1,6 @@
 import { certificateFor, type CertInfo } from "./certs";
-import { bouncerMiddleware, MIDDLEWARE as CROWDSEC_MIDDLEWARE } from "./crowdsec";
 import { clientCas, hosts, type ProxyHost } from "./db";
+import { rateLimitMiddleware } from "./ratelimit";
 
 // Every service is served over HTTPS with a Let's Encrypt certificate; plain HTTP is redirected by Traefik.
 const ENTRYPOINTS = ["websecure"];
@@ -47,7 +47,7 @@ export function buildConfig() {
   const middlewares: Record<string, unknown> = {};
   const tlsOptions: Record<string, unknown> = {};
   const cas = new Map(clientCas.list().map((ca) => [ca.id, ca]));
-  const bouncer = bouncerMiddleware();
+  const rateLimit = rateLimitMiddleware();
 
   for (const h of hosts.list()) {
     if (!h.enabled) continue;
@@ -59,8 +59,7 @@ export function buildConfig() {
       service: name,
       tls,
     };
-    // CrowdSec goes first: a banned IP gets no further, not even to a basic auth prompt.
-    const chain: string[] = bouncer ? [CROWDSEC_MIDDLEWARE] : [];
+    const chain: string[] = [];
     if (h.clientAuth !== "off") {
       const caPems = h.clientCaIds.map((id) => cas.get(id)?.certPem);
       // Fail closed: a service that should verify client certificates is never published without that check. The
@@ -100,6 +99,12 @@ export function buildConfig() {
       };
       chain.push(`${name}-auth`);
     }
+    // Rate limiting goes first, so it also slows down guessing basic auth passwords. Each service has its own
+    // middleware, and so its own buckets.
+    if (rateLimit) {
+      middlewares[`${name}-ratelimit`] = rateLimit;
+      chain.unshift(`${name}-ratelimit`);
+    }
     // HSTS applies to every service, whatever else is in the chain.
     chain.push(HSTS_MIDDLEWARE);
     router.middlewares = chain;
@@ -120,7 +125,6 @@ export function buildConfig() {
   // Traefik rejects an empty `http` element, so omit it entirely when nothing is routed.
   if (!Object.keys(routers).length) return { tls: tlsConfig };
   middlewares[HSTS_MIDDLEWARE] = { headers: { stsSeconds: HSTS_SECONDS } };
-  if (bouncer) middlewares[CROWDSEC_MIDDLEWARE] = bouncer;
   const http: Record<string, unknown> = { routers, services };
   if (Object.keys(serversTransports).length) http.serversTransports = serversTransports;
   if (Object.keys(middlewares).length) http.middlewares = middlewares;
@@ -163,13 +167,21 @@ export async function traefikStatus(): Promise<TraefikStatus> {
   }
 }
 
-/** State of one of proxytail's middlewares in Traefik, e.g. whether the CrowdSec plugin loaded. */
-export async function middlewareStatus(name: string): Promise<{ status: string; errors?: string[] } | null> {
+const RATE_LIMIT_NAME_RE = /^proxytail-host-(\d+)-ratelimit@http$/;
+
+/** Traefik's state of the services' rate limit middlewares; null while its API is unreachable. */
+export async function rateLimitStatus(): Promise<{ enabled: number; errors: string[] } | null> {
   try {
-    const res = await fetch(`${TRAEFIK_API_URL}/api/http/middlewares/${name}@http`, { signal: AbortSignal.timeout(2000) });
+    const res = await fetch(`${TRAEFIK_API_URL}/api/http/middlewares?search=-ratelimit&per_page=1000`, {
+      signal: AbortSignal.timeout(2000),
+    });
     if (!res.ok) return null;
-    const m = (await res.json()) as { status: string; error?: string[] };
-    return { status: m.status, errors: m.error };
+    const list = (await res.json()) as { name: string; status: string; error?: string[] }[];
+    const ours = list.filter((m) => RATE_LIMIT_NAME_RE.test(m.name));
+    return {
+      enabled: ours.filter((m) => m.status === "enabled").length,
+      errors: [...new Set(ours.flatMap((m) => m.error ?? []))],
+    };
   } catch {
     return null;
   }

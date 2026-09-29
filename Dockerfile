@@ -15,14 +15,12 @@ RUN case "$TARGETARCH" in \
       *) echo "unsupported arch: $TARGETARCH" >&2; exit 1 ;; \
     esac \
  && OUTFILE=/out/proxytail bun run build.ts "$target" \
- && mkdir -p /out/data /out/crowdsec
+ && mkdir -p /out/data
 
 # Distroless: glibc + CA certificates, no shell. The compiled binary embeds the Bun runtime and the frontend.
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /out/proxytail /proxytail
 COPY --from=build --chown=nonroot:nonroot /out/data /data
-# The CrowdSec bouncer key volume: a new named volume takes this ownership.
-COPY --from=build --chown=nonroot:nonroot /out/crowdsec /crowdsec
 
 ENV NODE_ENV=production \
     PORT=3000 \

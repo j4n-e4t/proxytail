@@ -100,8 +100,6 @@ export interface Settings {
   backendTag: string;
   /** The proxy host's Tailscale version, when it could be found in the tailnet. */
   tailscaleVersion: string | null;
-  /** The CrowdSec integration is on: the Security page and CrowdSec settings are shown. */
-  crowdsec: boolean;
 }
 
 export interface CertInfo {
@@ -121,77 +119,36 @@ export interface TraefikStatus {
   certificates: Record<number, CertInfo>;
 }
 
-export interface CrowdsecConfig {
+export type RateLimitStore = "memory" | "valkey";
+export type RateLimitPeriod = "1s" | "1m" | "1h";
+
+export interface RateLimitConfig {
   enabled: boolean;
-  cacheSeconds: number;
-  trustedIps: string[];
+  /** Where Traefik keeps the token buckets. */
+  store: RateLimitStore;
+  /** Requests a client IP may make to one service per period, on average. */
+  average: number;
+  period: RateLimitPeriod;
+  /** Requests a client IP may make at once, before the average applies. */
+  burst: number;
 }
 
-export interface CrowdsecView {
-  config: CrowdsecConfig;
-  status: {
-    key: boolean;
-    lapi: { reachable: boolean; keyAccepted?: boolean; error?: string };
-    metrics?: { version?: string; linesRead: number; linesParsed: number; decisions: Record<string, number> };
-  };
-  /** The bouncer middleware in Traefik, while enabled. Null until Traefik has picked it up. */
-  middleware: { status: string; errors?: string[] } | null;
+export interface ValkeyStatus {
+  addr: string;
+  reachable: boolean;
+  server?: string;
+  version?: string;
+  error?: string;
 }
 
-export type StatsRange = "24h" | "7d" | "30d";
-
-export interface Ranked {
-  key: string;
-  label: string;
-  alerts: number;
-  /** Distinct source IPs. */
-  sources: number;
-  serviceId?: number | null;
-}
-
-export interface SecurityAlert {
-  id: number;
-  at: string;
-  ip: string;
-  country: string | null;
-  as: string | null;
-  scenario: string;
-  events: number;
-  hosts: string[];
-  paths: string[];
-  serviceId: number | null;
-  banned: boolean;
-}
-
-export interface Ban {
-  decisionId: number;
-  alertId: number;
-  value: string;
-  scope: string;
-  type: string;
-  origin: string;
-  scenario: string;
-  country: string | null;
-  as: string | null;
-  until: string;
-  hosts: string[];
-}
-
-export interface CrowdsecStats {
-  range: StatsRange;
-  generatedAt: string;
-  /** More alerts than the API returns at once: the oldest are left out. */
-  truncated: boolean;
-  totals: { alerts: number; sources: number; countries: number; events: number };
-  timeline: { start: string; alerts: number; sources: number }[];
-  bucketHours: number;
-  scenarios: Ranked[];
-  countries: Ranked[];
-  networks: Ranked[];
-  services: Ranked[];
-  recent: SecurityAlert[];
-  bans: Ban[];
-  metrics?: CrowdsecView["status"]["metrics"];
+export interface RateLimitView {
+  config: RateLimitConfig;
+  /** Where Traefik keeps the buckets right now: memory while a configured Valkey is down. Null while off. */
+  activeStore: RateLimitStore | null;
+  /** Only while Valkey is the configured store. */
+  valkey: ValkeyStatus | null;
+  /** The services' middlewares in Traefik, while on. Null while Traefik is unreachable. */
+  traefik: { enabled: number; errors: string[] } | null;
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -226,12 +183,6 @@ export const api = {
   saveSettings: (s: Record<string, string | null>) => request<Settings>("PUT", "/api/settings", s),
   testSettings: () => request<{ ok: boolean; devices: number }>("POST", "/api/settings/test"),
   traefik: () => request<TraefikStatus>("GET", "/api/traefik/status"),
-  crowdsec: () => request<CrowdsecView>("GET", "/api/crowdsec"),
-  saveCrowdsec: (c: Partial<CrowdsecConfig>) => request<CrowdsecView>("PUT", "/api/crowdsec", c),
-  crowdsecStats: (range: StatsRange, fresh = false) =>
-    request<CrowdsecStats>(
-      "GET",
-      `/api/crowdsec/stats?range=${range}&utcOffset=${-new Date().getTimezoneOffset()}${fresh ? "&fresh" : ""}`,
-    ),
-  unban: (decisionId: number) => request<void>("DELETE", `/api/crowdsec/decisions/${decisionId}`),
+  rateLimit: () => request<RateLimitView>("GET", "/api/rate-limit"),
+  saveRateLimit: (c: Partial<RateLimitConfig>) => request<RateLimitView>("PUT", "/api/rate-limit", c),
 };

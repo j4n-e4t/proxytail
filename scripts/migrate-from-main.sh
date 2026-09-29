@@ -1,5 +1,5 @@
 #!/bin/sh
-# Moves a running proxytail stack from `main` to this branch, with CrowdSec off. Run it on the proxy host, from the
+# Moves a running proxytail stack from `main` to this branch. Run it on the proxy host, from the
 # repository checkout docker-compose.yml lives in, after `git checkout crowdsec`:
 #
 #   scripts/migrate-from-main.sh            # back up, build, switch over, check
@@ -58,21 +58,18 @@ rollback() {
 }
 
 migrate() {
-  [ -f docker-compose.crowdsec.yml ] || die "Run this from a checkout of the crowdsec branch"
+  [ -f src/ratelimit.ts ] || die "Run this from a checkout of the crowdsec branch"
   [ -f .env ] || die ".env not found: run this where main's stack was started"
   command -v docker >/dev/null || die "docker not found"
   command -v curl >/dev/null || die "curl not found"
   docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
   docker volume inspect "$DATA_VOLUME" >/dev/null 2>&1 || die "Volume $DATA_VOLUME not found. Set COMPOSE_PROJECT_NAME if the stack runs under another name."
-  if grep -q '^COMPOSE_FILE=.*crowdsec' .env || [ -n "${COMPOSE_FILE:-}" ]; then
-    die "CrowdSec is enabled (COMPOSE_FILE). Comment it out in .env to migrate with CrowdSec off."
-  fi
   [ ! -f "$ENV_BACKUP" ] || die "$ENV_BACKUP exists: a migration already ran. Roll it back first, or delete it."
 
   say "Building the app image ($LOCAL_IMAGE) while main keeps serving"
   PROXYTAIL_IMAGE="$LOCAL_IMAGE" docker compose build app
-  say "Pulling Traefik and busybox"
-  docker compose pull traefik volume-init || echo "Couldn't pull: using the local images, if there are any."
+  say "Pulling Traefik, Valkey and busybox"
+  docker compose pull traefik volume-init valkey || echo "Couldn't pull: using the local images, if there are any."
   # Nothing stops until every image the new stack needs is here.
   for image in $(PROXYTAIL_IMAGE="$LOCAL_IMAGE" docker compose config --images) "$BUSYBOX"; do
     docker image inspect "$image" >/dev/null 2>&1 || die "Image $image is missing. main is still running."
@@ -114,7 +111,7 @@ migrate() {
 
   say "Done"
   cat <<EOF
-- CrowdSec stays off. To add it later, see the README (COMPOSE_FILE in .env).
+- Rate limiting stays off. Turn it on under Settings → Rate limiting.
 - Traefik now refuses TLS for hostnames it has no certificate for, including clients that send none.
 - Backup: backups/proxytail-$stamp.tar.gz. To undo: $0 rollback
 EOF
