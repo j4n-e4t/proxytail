@@ -16,6 +16,7 @@ services:
       - chown -R 65532:65532 /volumes/* && chmod 700 /volumes/letsencrypt
     volumes:
       - traefik-acme:/volumes/letsencrypt
+      - ${DATA_DIR:-./data}/traefik-logs:/volumes/traefik-logs
 
   traefik:
     image: ${TRAEFIK_IMAGE:-traefik:v3.7.13}
@@ -32,6 +33,8 @@ services:
       - "127.0.0.1:${TRAEFIK_DASHBOARD_PORT:-8080}:8080"
     volumes:
       - traefik-acme:/letsencrypt
+      # The access log, for the app on the host (it reads data/traefik-logs/access.log by default).
+      - ${DATA_DIR:-./data}/traefik-logs:/var/log/traefik
     # The same static configuration as docker-compose.yml.
     environment:
       TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":8000"
@@ -60,6 +63,10 @@ services:
       TRAEFIK_PROVIDERS_HTTP_POLLINTERVAL: 5s
       TRAEFIK_LOG_LEVEL: INFO
       TRAEFIK_ACCESSLOG: "true"
+      TRAEFIK_ACCESSLOG_FILEPATH: /var/log/traefik/access.log
+      TRAEFIK_ACCESSLOG_FORMAT: json
+      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_NAMES_User-Agent: keep
+      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_NAMES_Referer: keep
     healthcheck:
       test: ["CMD", "traefik", "healthcheck"]
       interval: 30s

@@ -6,7 +6,8 @@ const target = process.argv[2] as Bun.Build.CompileTarget | undefined;
 const outfile = process.env.OUTFILE ?? "dist/proxytail";
 
 const result = await Bun.build({
-  entrypoints: ["./src/main.ts"],
+  // The access log stats worker is a separate entrypoint, loaded by path at runtime.
+  entrypoints: ["./src/main.ts", "./src/accesslog-worker.ts"],
   compile: target ? { target, outfile } : { outfile },
   plugins: [tailwind],
   minify: true,

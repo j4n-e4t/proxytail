@@ -27,6 +27,7 @@ services:
       TRAEFIK_TLS_ADDR: traefik:8443
       TLS_MIN_VERSION: ${TLS_MIN_VERSION:-1.2}
       VALKEY_ADDR: valkey:6379
+      ACCESS_LOG_PATH: /logs/access.log
       TS_OAUTH_CLIENT_ID: ${TS_OAUTH_CLIENT_ID:-}
       TS_OAUTH_CLIENT_SECRET: ${TS_OAUTH_CLIENT_SECRET:-}
       TS_TAILNET: ${TS_TAILNET:-}
@@ -37,6 +38,9 @@ services:
       - "127.0.0.1:${UI_PORT:-3000}:3000"
     volumes:
       - proxytail-data:/data
+      # Traefik's access log. proxytail stores each request and empties the file once it's read, so it needs write
+      # access (it runs as 65532, like Traefik).
+      - traefik-logs:/logs
     read_only: true
     tmpfs:
       - /tmp
@@ -59,6 +63,7 @@ services:
       - chown -R 65532:65532 /volumes/* && chmod 700 /volumes/letsencrypt
     volumes:
       - traefik-acme:/volumes/letsencrypt
+      - traefik-logs:/volumes/traefik-logs
     read_only: true
     cap_drop:
       - ALL
@@ -122,10 +127,16 @@ services:
       TRAEFIK_PROVIDERS_HTTP_ENDPOINT: http://app:3000/api/traefik/config
       TRAEFIK_PROVIDERS_HTTP_POLLINTERVAL: 5s
       TRAEFIK_LOG_LEVEL: INFO
-      # Access log on stdout, rotated by Docker.
+      # The access log goes to a file that proxytail reads for its Requests page, which empties it once read. It keeps
+      # the User-Agent and Referer headers (other headers are dropped, including Authorization and cookies).
       TRAEFIK_ACCESSLOG: "true"
+      TRAEFIK_ACCESSLOG_FILEPATH: /var/log/traefik/access.log
+      TRAEFIK_ACCESSLOG_FORMAT: json
+      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_NAMES_User-Agent: keep
+      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_NAMES_Referer: keep
     volumes:
       - traefik-acme:/letsencrypt
+      - traefik-logs:/var/log/traefik
     healthcheck:
       test: ["CMD", "traefik", "healthcheck"]
       interval: 30s
@@ -177,3 +188,4 @@ services:
 volumes:
   proxytail-data:
   traefik-acme:
+  traefik-logs:

@@ -151,6 +151,86 @@ export interface RateLimitView {
   traefik: { enabled: number; errors: string[] } | null;
 }
 
+export type AccessLogRange = "1h" | "24h" | "7d";
+
+export interface AccessLogStatus {
+  path: string;
+  /** "missing" until Traefik has written its access log file. */
+  state: "ok" | "missing" | "error";
+  error?: string;
+  size?: number;
+  truncateError?: string;
+  entries: number;
+  oldest: number | null;
+  newest: number | null;
+  retentionDays: number;
+}
+
+export interface AccessLogFilters {
+  range: AccessLogRange;
+  /** A service id, or "none" for requests that matched no service. */
+  service?: string;
+  /** "2xx" … "5xx", or an exact code. */
+  status?: string;
+  ip?: string;
+  q?: string;
+}
+
+export interface AccessLogEntry {
+  id: number;
+  time: string;
+  serviceId: number | null;
+  router: string | null;
+  clientIp: string;
+  method: string;
+  host: string;
+  path: string;
+  protocol: string | null;
+  status: number;
+  /** The service's own status; null when the request never reached it (e.g. rate limited). */
+  originStatus: number | null;
+  durationMs: number;
+  originMs: number | null;
+  size: number;
+  userAgent: string | null;
+  referer: string | null;
+  tlsVersion: string | null;
+  entrypoint: string | null;
+}
+
+export type StatusClass = "2xx" | "3xx" | "4xx" | "5xx";
+
+export interface TopItem {
+  key: string | number | null;
+  requests: number;
+  /** Responses with status 400 and up. */
+  errors: number;
+}
+
+export interface AccessLogStats {
+  range: AccessLogRange;
+  bucketMs: number;
+  totals: {
+    requests: number;
+    clients: number;
+    clientErrors: number;
+    serverErrors: number;
+    bytes: number;
+    p50Ms: number | null;
+    p95Ms: number | null;
+  };
+  timeline: ({ start: string } & Record<StatusClass, number>)[];
+  paths: TopItem[];
+  clients: TopItem[];
+  services: TopItem[];
+  statuses: { status: number; requests: number }[];
+}
+
+const query = (f: AccessLogFilters, extra: Record<string, string> = {}) =>
+  new URLSearchParams(
+    Object.entries({ ...f, ...extra }).filter((e): e is [string, string] => !!e[1]),
+  ).toString();
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
@@ -183,6 +263,14 @@ export const api = {
   saveSettings: (s: Record<string, string | null>) => request<Settings>("PUT", "/api/settings", s),
   testSettings: () => request<{ ok: boolean; devices: number }>("POST", "/api/settings/test"),
   traefik: () => request<TraefikStatus>("GET", "/api/traefik/status"),
+  accessLog: () => request<AccessLogStatus>("GET", "/api/access-log"),
+  saveAccessLog: (retentionDays: number) => request<AccessLogStatus>("PUT", "/api/access-log", { retentionDays }),
+  accessLogEntries: (f: AccessLogFilters, before?: number) =>
+    request<{ entries: AccessLogEntry[]; hasMore: boolean }>(
+      "GET",
+      `/api/access-log/entries?${query(f, before ? { before: String(before) } : {})}`,
+    ),
+  accessLogStats: (f: AccessLogFilters) => request<AccessLogStats>("GET", `/api/access-log/stats?${query(f)}`),
   rateLimit: () => request<RateLimitView>("GET", "/api/rate-limit"),
   saveRateLimit: (c: Partial<RateLimitConfig>) => request<RateLimitView>("PUT", "/api/rate-limit", c),
 };

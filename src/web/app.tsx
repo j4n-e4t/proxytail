@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  Activity,
   Database,
   Globe,
   Monitor,
@@ -26,14 +27,15 @@ import { useTheme, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ClientCasPage } from "@/pages/client-cas";
 import { PeersPage } from "@/pages/peers";
+import { RequestsPage } from "@/pages/requests";
 import { ServiceEditorDialog } from "@/pages/service-editor";
 import { DomainsPage } from "@/pages/domains";
 import { HostsPage } from "@/pages/hosts";
 import { SettingsPage } from "@/pages/settings";
 import "./globals.css";
 
-type Page = "services" | "domains" | "client-cas" | "peers" | "settings";
-const PAGES: Page[] = ["services", "domains", "client-cas", "peers", "settings"];
+type Page = "services" | "requests" | "domains" | "client-cas" | "peers" | "settings";
+const PAGES: Page[] = ["services", "requests", "domains", "client-cas", "peers", "settings"];
 
 interface Route {
   page: Page;
@@ -196,6 +198,12 @@ function Console() {
             onClick={() => setPage("services")}
           />
           <NavItem
+            icon={Activity}
+            label="Requests"
+            active={page === "requests"}
+            onClick={() => setPage("requests")}
+          />
+          <NavItem
             icon={Globe}
             label="Domains"
             count={domains.data?.length}
@@ -295,7 +303,16 @@ function Console() {
               traefik={traefik.data}
               onNew={() => navigate("services/new")}
               onEdit={(h) => navigate(`services/${h.id}`)}
+              onViewRequests={(h) => navigate(`requests?service=${h.id}`)}
               onChanged={refreshHosts}
+            />
+          )}
+          {page === "requests" && (
+            <RequestsPage
+              // A new link from a service starts over with that service's filter.
+              key={route.params.get("service") ?? ""}
+              hosts={hosts.data ?? []}
+              initialService={route.params.get("service") ?? undefined}
             />
           )}
           {page === "domains" && (

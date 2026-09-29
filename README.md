@@ -14,6 +14,8 @@ browser ──► app.example.com ──► Traefik ──► host's tailscale0 
 - **proxytail** (Bun + SQLite + React, shadcn/ui on Tailwind v4) stores your domains and services, lists tailnet peers
   through the Tailscale API, and serves Traefik's dynamic configuration.
 - **Valkey** optionally keeps the counters for per-client [rate limiting](#rate-limiting).
+- **Requests:** proxytail reads Traefik's access log and shows every request your services get. See
+  [Requests](#requests).
 - **Traefik** and proxytail run as containers on a private Docker network, on a dedicated proxy host that is itself on
   your tailnet. Traefik reaches peers through the host's Tailscale, and proxytail's UI is only published on the host's
   loopback, for `tailscale serve`.
@@ -61,6 +63,7 @@ Then, in the UI:
 4. Optionally, **Client CAs:** require client certificates for a service. See [Client certificates (mTLS)](#client-certificates-mtls).
 5. Optionally, **Settings → Rate limiting:** limit how many requests each client IP can make. See
    [Rate limiting](#rate-limiting).
+6. **Requests:** watch the traffic your services get, or pick **View requests** in a service's menu.
 
 Only peers tagged `tag:proxytail-backend` are listed and can be targeted. Change the tag under **Settings** or with
 `TS_BACKEND_TAG`. Define the tag under `tagOwners` in your tailnet policy and apply it to each backend, e.g.
@@ -107,7 +110,8 @@ certificates.
 - **Traefik's API** is only reachable on the Docker network, and its dashboard is off. Traefik doesn't check for new
   versions or send usage statistics, and Docker checks its health through `/ping`.
 - **Resources:** every container has a memory limit (`APP_MEM_LIMIT`, `TRAEFIK_MEM_LIMIT`) and
-  a process limit, and Docker rotates their logs at 10 MB (3 files).
+  a process limit, and Docker rotates their logs at 10 MB (3 files). Traefik's access log is a file that proxytail
+  empties once it's read it past 16 MB.
 - **Favicons:** proxytail fetches service icons from the backend itself. It follows redirects only on the backend (a
   `Location` naming another host is fetched from the backend too) and stops reading a response past its size limit.
 
@@ -152,8 +156,8 @@ before basic auth, so it also slows down password guessing. Requests over the li
 
 - **Per client IP and service:** each service has its own middleware, so a client that hits the limit on one service
   can still use the others. Clients are told apart by their address as Traefik sees it. Docker's published ports keep
-  IPv4 source addresses, but if Traefik's access log shows a Docker gateway address (`172.x`, `192.168.x`) instead,
-  every client shares one budget.
+  IPv4 source addresses, but if the **Requests** page shows a Docker gateway address (`172.x`, `192.168.x`) as the
+  client, every client shares one budget.
 - **Average and burst:** a client can make **Burst** requests at once, e.g. when a page loads its scripts and images,
   and then keep up the **Average** per second, minute or hour. The defaults, 20 per second with a burst of 100, only
   stop floods.
@@ -166,6 +170,31 @@ before basic auth, so it also slows down password guessing. Requests over the li
 - **Fallback:** Traefik answers `500` to every request it can't count in Valkey. proxytail checks Valkey every
   5 seconds, and while it's down, it switches the middlewares to Traefik's memory until it's back. The settings show
   **Fallback** meanwhile.
+
+## Requests
+
+The **Requests** page shows what Traefik served over the last hour, 24 hours or 7 days:
+
+- the number of requests and distinct clients, the share of 4xx and 5xx responses, response times (95th percentile and
+  median) and the data sent;
+- requests over time, stacked by status class, and the top services, paths, clients and status codes. Click one to
+  filter the page by it;
+- the requests themselves, newest first, with a search across paths, hostnames, client IPs and user agents. Click a
+  request for its details: the status the service itself returned (none when Traefik answered, e.g. with a `429`),
+  time spent at the service, TLS version, user agent and referer.
+
+**Live** refreshes the list every 5 seconds, and the figures every 5 seconds to a minute depending on the period. The
+**No service** filter shows requests no service matched, e.g. for hostnames that aren't set up.
+
+How it works:
+
+- Traefik writes its access log as JSON to the `traefik-logs` volume, keeping the `User-Agent` and `Referer` headers
+  and dropping all others, including `Authorization` and cookies.
+- proxytail follows the file, stores each request in its database, and empties the file once it has read it past
+  16 MB, so it needs write access to the volume. If it can't, **Settings → Request log** says so.
+- Requests are kept for 7 days by default (**Settings → Request log**, 1 to 90 days), and at most a million of them
+  (`ACCESS_LOG_MAX_ROWS`). The figures for a period are computed in a background thread and reused for a few
+  seconds, so a busy week doesn't slow down the UI.
 
 ## Security model
 
@@ -201,6 +230,9 @@ at the network layer. That's a deliberate trade-off for personal and homelab set
 - **Traefik's API is unauthenticated** (routers, services, basic auth hashes), so it's only reachable on the Docker
   network, like `/api/traefik/config`.
 - **Valkey has no password** and is only reachable on the Docker network. It only holds rate limit counters.
+- **The request log is personal data:** client IPs, user agents, and full URLs including query strings, which can hold
+  tokens if a service puts them there. It stays in proxytail's database for the retention you set, and anyone who can
+  open the UI can read it.
 
 Traefik can reach the internet (it needs to for Let's Encrypt), and it holds the certificates and basic auth hashes it
 serves. Client CAs are stored as certificates only, without keys, so neither proxytail nor Traefik can mint client
@@ -223,6 +255,8 @@ docker compose -f docker-compose.dev.yml up -d  # Traefik, pointed at the app on
   page with its own favicon.
 - The dev stack includes Valkey, published on `127.0.0.1:6379` for the app on the host (`VALKEY_ADDR`). Traefik
   reaches it as `valkey:6379` (`VALKEY_TRAEFIK_ADDR`).
+- The dev Traefik writes its access log to `data/traefik-logs/`, which the app reads (`ACCESS_LOG_PATH` overrides
+  the path). On Linux, the file belongs to Traefik's user, so the app can't empty it: remove it now and then.
 - To develop without a tailnet, set `TS_MOCK_DEVICES=/path/devices.json`. The file uses the Tailscale API's
   `{ "devices": [...] }` format.
 - `bun run build` compiles the server and the bundled frontend into a single executable, `dist/proxytail`. On macOS,

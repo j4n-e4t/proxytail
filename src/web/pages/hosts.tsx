@@ -52,6 +52,7 @@ export function HostsPage(props: {
   traefik: TraefikStatus | null;
   onNew: () => void;
   onEdit: (h: ProxyHost) => void;
+  onViewRequests: (h: ProxyHost) => void;
   onChanged: () => void;
 }) {
   const { hosts, devices, traefik } = props;
@@ -244,6 +245,9 @@ export function HostsPage(props: {
                             <a href={`https://${h.domains[0]}`} target="_blank" rel="noreferrer">
                               <ExternalLink /> Open
                             </a>
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => props.onViewRequests(h)}>
+                            <Activity /> View requests
                           </DropdownMenuItem>
                           <DropdownMenuItem onSelect={() => copy(targetUrl(h))}>
                             <Copy /> Copy target URL

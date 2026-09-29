@@ -3,10 +3,11 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { CertSummary } from "./pki";
 
-const dataDir = process.env.DATA_DIR ?? join(import.meta.dir, "..", "data");
+export const dataDir = process.env.DATA_DIR ?? join(import.meta.dir, "..", "data");
 mkdirSync(dataDir, { recursive: true });
 
-export const db = new Database(join(dataDir, "proxytail.db"), { create: true, strict: true });
+export const dbPath = join(dataDir, "proxytail.db");
+export const db = new Database(dbPath, { create: true, strict: true });
 db.run("PRAGMA journal_mode = WAL");
 db.run("PRAGMA foreign_keys = ON");
 
@@ -376,7 +377,12 @@ export const clientCas = {
   },
 };
 
-export type SettingKey = "public_address" | "backend_tag" | "rate_limit";
+export type SettingKey =
+  | "public_address"
+  | "backend_tag"
+  | "rate_limit"
+  | "access_log_retention_days"
+  | "access_log_cursor";
 
 export const settings = {
   get(key: SettingKey): string | undefined {

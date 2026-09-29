@@ -10,9 +10,9 @@ import { settings } from "./db";
  * - `valkey`: the buckets live in the Valkey container and survive reloads and restarts. Traefik answers 500 to every
  *   request while it can't reach Valkey, so proxytail checks Valkey itself and falls back to `memory` while it's down.
  */
-const VALKEY_ADDR = process.env.VALKEY_ADDR ?? "localhost:6379";
+const VALKEY_ADDR = process.env.VALKEY_ADDR || "localhost:6379";
 /** How Traefik reaches Valkey, from inside its container. */
-const TRAEFIK_VALKEY_ADDR = process.env.VALKEY_TRAEFIK_ADDR ?? "valkey:6379";
+const TRAEFIK_VALKEY_ADDR = process.env.VALKEY_TRAEFIK_ADDR || "valkey:6379";
 const HEALTH_INTERVAL_MS = 5000;
 
 export type RateLimitStore = "memory" | "valkey";

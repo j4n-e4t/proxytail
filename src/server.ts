@@ -2,6 +2,16 @@ import { SQLiteError } from "bun:sqlite";
 import index from "./web/index.html";
 import { checkBrowserOrigin } from "./guard";
 import {
+  accessLogStats,
+  accessLogStatus,
+  entries as accessLogEntries,
+  FilterError,
+  RANGES as ACCESS_LOG_RANGES,
+  setRetentionDays,
+  type Filters,
+  type Range,
+} from "./accesslog";
+import {
   clientCas,
   domains as domainStore,
   hosts,
@@ -55,7 +65,7 @@ function handle<T extends Request>(fn: (req: T) => Promise<Response> | Response)
       return await fn(req);
     } catch (e) {
       if (e instanceof HttpError || e instanceof TailscaleError) return json({ error: e.message }, e.status);
-      if (e instanceof PkiError) return json({ error: e.message }, 400);
+      if (e instanceof PkiError || e instanceof FilterError) return json({ error: e.message }, 400);
       console.error(e);
       return json({ error: "Internal server error" }, 500);
     }
@@ -286,6 +296,15 @@ async function rateLimitView() {
   return { config, activeStore: config.enabled ? activeStore(config) : null, valkey, traefik };
 }
 
+/** Access log filters from the query string. */
+function accessLogFilters(params: URLSearchParams): Filters {
+  const range = (params.get("range") ?? "24h") as Range;
+  if (!Object.hasOwn(ACCESS_LOG_RANGES, range))
+    throw new HttpError(400, `Range must be one of ${Object.keys(ACCESS_LOG_RANGES).join(", ")}`);
+  const get = (key: string) => params.get(key)?.trim() || undefined;
+  return { range, service: get("service"), status: get("status"), method: get("method"), ip: get("ip"), q: get("q") };
+}
+
 const port = Number(process.env.PORT ?? 3000);
 
 /**
@@ -499,6 +518,28 @@ const server = Bun.serve({
         await saveRateLimitConfig(await validateRateLimit(await body(req)));
         return json(await rateLimitView());
       }),
+    },
+
+    "/api/access-log": {
+      GET: handle(() => json(accessLogStatus())),
+      PUT: handle(async (req) => {
+        const days = Number((await body<{ retentionDays?: unknown }>(req)).retentionDays);
+        if (!Number.isInteger(days) || days < 1 || days > 90)
+          throw new HttpError(400, "Keep requests for 1 to 90 days");
+        setRetentionDays(days);
+        return json(accessLogStatus());
+      }),
+    },
+    "/api/access-log/entries": {
+      GET: handle((req) => {
+        const params = new URL(req.url).searchParams;
+        const before = params.get("before") ? parseId(params.get("before")!) : null;
+        const limit = Math.min(Math.max(Number(params.get("limit")) || 100, 1), 500);
+        return json(accessLogEntries(accessLogFilters(params), before, limit));
+      }),
+    },
+    "/api/access-log/stats": {
+      GET: handle(async (req) => json(await accessLogStats(accessLogFilters(new URL(req.url).searchParams)))),
     },
 
     "/api/health": { GET: () => json({ ok: true }) },

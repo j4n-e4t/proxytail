@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/page-header";
 import { ToneBadge } from "@/components/status";
 import { api, type Settings, type TraefikStatus } from "@/lib/api";
+import { AccessLogCard } from "@/pages/access-log-settings";
 import { RateLimitCard } from "@/pages/rate-limit-settings";
 
 function Field(props: { id: string; label: string; hint?: React.ReactNode; children: React.ReactNode }) {
@@ -279,6 +280,7 @@ export function SettingsPage({
       </Card>
 
       <RateLimitCard className="xl:col-span-2 xl:row-start-3" />
+      <AccessLogCard className="xl:col-span-2 xl:row-start-4" />
       </div>
     </div>
   );
