@@ -15,22 +15,6 @@ const TRAEFIK_API_URL = process.env.TRAEFIK_API_URL ?? "http://localhost:8080";
 const HSTS_MIDDLEWARE = "proxytail-hsts";
 const HSTS_SECONDS = 31_536_000;
 
-/** The service's response headers (Advanced in its editor), or null when it has none. */
-function responseHeaders(h: ProxyHost) {
-  const { noIndex, framing } = h.headers;
-  const headers: Record<string, unknown> = {};
-  if (noIndex) headers.customResponseHeaders = { "X-Robots-Tag": "noindex, nofollow" };
-  if (framing === "deny") headers.frameDeny = true;
-  if (framing === "sameorigin") headers.customFrameOptionsValue = "SAMEORIGIN";
-  return Object.keys(headers).length ? { headers } : null;
-}
-
-/** The service's request headers, or null when it has none. */
-function requestHeaders(h: ProxyHost) {
-  const list = h.headers.requestHeaders;
-  return list.length ? { headers: { customRequestHeaders: Object.fromEntries(list.map((x) => [x.name, x.value])) } } : null;
-}
-
 const hostRule = (hostnames: string[]) => hostnames.map((d) => `Host(\`${d}\`)`).join(" || ");
 
 export const routerName = (h: Pick<ProxyHost, "id">) => `proxytail-host-${h.id}`;
@@ -125,23 +109,17 @@ export function buildConfig() {
       middlewares[`${name}-host`] = { headers: { customRequestHeaders: { Host: hostname } } };
       chain.push(`${name}-host`);
     }
-    // Request headers come after basic auth, so a configured Authorization header can't pass the password check.
-    const request = requestHeaders(h);
-    if (request) {
-      middlewares[`${name}-request-headers`] = request;
-      chain.push(`${name}-request-headers`);
-    }
     // Rate limiting goes first, so it also slows down guessing basic auth passwords. Each service has its own
     // middleware, and so its own buckets.
     if (rateLimit) {
       middlewares[`${name}-ratelimit`] = rateLimit;
       chain.unshift(`${name}-ratelimit`);
     }
-    // Response headers go before everything, so they're also on responses the middlewares answer (401, 429).
-    const response = responseHeaders(h);
-    if (response) {
-      middlewares[`${name}-response-headers`] = response;
-      chain.unshift(`${name}-response-headers`);
+    // Hide from search engines (Advanced in the editor). First, so it's also on responses the middlewares answer
+    // themselves (401, 429).
+    if (h.noIndex) {
+      middlewares[`${name}-noindex`] = { headers: { customResponseHeaders: { "X-Robots-Tag": "noindex, nofollow" } } };
+      chain.unshift(`${name}-noindex`);
     }
     // HSTS applies to every service, whatever else is in the chain.
     chain.push(HSTS_MIDDLEWARE);

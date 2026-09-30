@@ -28,20 +28,10 @@ export interface ProxyHost {
   clientAuth: ClientAuth;
   clientCaIds: number[];
   clientCertHeaders: boolean;
-  headers: HostHeaders;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/** Whether browsers may show a service inside a frame: left to the service, same origin only, or never. */
-export type Framing = "service" | "sameorigin" | "deny";
-
-export interface HostHeaders {
   /** Sends `X-Robots-Tag: noindex, nofollow`. */
   noIndex: boolean;
-  framing: Framing;
-  /** Set on every request to the service; an empty value removes the header. */
-  requestHeaders: { name: string; value: string }[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type ProxyHostDraft = Pick<
@@ -57,7 +47,7 @@ export type ProxyHostDraft = Pick<
   | "clientAuth"
   | "clientCaIds"
   | "clientCertHeaders"
-  | "headers"
+  | "noIndex"
 > & {
   /** Omit `password` to keep the stored one; `previous` is the username before a rename. */
   basicAuthUsers: { username: string; password?: string; previous?: string }[];

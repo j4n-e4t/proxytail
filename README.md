@@ -117,22 +117,11 @@ certificates.
 - A client can't get around the check by sending a different SNI name than the `Host` header, e.g. the name of a
   service without client certificates: Traefik answers `421 Misdirected Request` when their TLS options differ.
 
-## Headers
+## Hiding from search engines
 
-Under **Advanced** in a service's editor:
-
-- **Hide from search engines** sends `X-Robots-Tag: noindex, nofollow`, so well-behaved crawlers don't list the
-  service. It doesn't keep anyone out.
-- **Framing** sets `X-Frame-Options` to `SAMEORIGIN` or `DENY`, overriding what the service sends, so other sites
-  can't show it in a frame for clickjacking. A service that allows framing in its own `Content-Security-Policy`
-  (`frame-ancestors`) still does in current browsers.
-- **Request headers** are set on every request to the service, e.g. a token the backend expects. An empty value
-  removes a header the client sent. Connection headers and those Traefik manages (`Host`, `X-Forwarded-*`,
-  `X-Real-Ip`, the client certificate header) can't be set. Values show up in Traefik's configuration.
-
-Response headers come first in the service's middleware chain, so they're also on responses Traefik answers itself
-(`401`, `429`). Request headers come after basic auth, so a configured `Authorization` header can't stand in for the
-password.
+**Hide from search engines**, under **Advanced** in a service's editor, sends `X-Robots-Tag: noindex, nofollow` with
+every response, including the `401` of basic auth and the `429` of rate limiting, so well-behaved crawlers don't list
+the service. It doesn't keep anyone out.
 
 ## Hardening
 

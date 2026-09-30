@@ -21,7 +21,6 @@ import {
   type Device,
   type AliasMode,
   type Domain,
-  type Framing,
   type ProxyHost,
   type ProxyHostDraft,
   type TraefikStatus,
@@ -127,19 +126,6 @@ interface UserRow {
   previous?: string;
 }
 
-interface HeaderRow {
-  /** Stable React key. */
-  key: number;
-  name: string;
-  value: string;
-}
-
-const FRAMING: Record<Framing, { label: string; hint: string }> = {
-  service: { label: "Service decides", hint: "proxytail doesn't add anything." },
-  sameorigin: { label: "Same site only", hint: "X-Frame-Options: SAMEORIGIN. Only the service's own pages can frame it." },
-  deny: { label: "Never", hint: "X-Frame-Options: DENY. No page can show the service in a frame." },
-};
-
 let nextKey = 0;
 
 function ServiceForm(
@@ -175,14 +161,7 @@ function ServiceForm(
         : [],
   );
   const [certHeaders, setCertHeaders] = useState(existing?.clientCertHeaders ?? false);
-  const [noIndex, setNoIndex] = useState(existing?.headers.noIndex ?? false);
-  const [framing, setFraming] = useState<Framing>(existing?.headers.framing ?? "service");
-  const [requestHeaders, setRequestHeaders] = useState<HeaderRow[]>(
-    () => existing?.headers.requestHeaders.map((h) => ({ key: nextKey++, ...h })) ?? [],
-  );
-  const setHeader = (key: number, patch: Partial<HeaderRow>) =>
-    setRequestHeaders((hs) => hs.map((h) => (h.key === key ? { ...h, ...patch } : h)));
-  const headersOn = noIndex || framing !== "service" || requestHeaders.some((h) => h.name.trim());
+  const [noIndex, setNoIndex] = useState(existing?.noIndex ?? false);
   const [tab, setTab] = useState<Tab>("domains");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -230,13 +209,7 @@ function ServiceForm(
       clientAuth,
       clientCaIds: clientAuth === "off" ? [] : caIds,
       clientCertHeaders: clientAuth !== "off" && certHeaders,
-      headers: {
-        noIndex,
-        framing,
-        requestHeaders: requestHeaders
-          .filter((h) => h.name.trim() || h.value)
-          .map((h) => ({ name: h.name.trim(), value: h.value })),
-      },
+      noIndex,
       basicAuthUsers: users
         .filter((u) => u.username.trim() || u.password)
         .map((u) => ({ username: u.username.trim(), password: u.password || undefined, previous: u.previous })),
@@ -328,7 +301,7 @@ function ServiceForm(
             </TabsTrigger>
             <TabsTrigger value="advanced">
               Advanced
-              {headersOn && <span className="size-1.5 rounded-full bg-primary" aria-label="headers set" />}
+              {noIndex && <span className="size-1.5 rounded-full bg-primary" aria-label="hidden from search engines" />}
             </TabsTrigger>
           </TabsList>
         </DialogHeader>
@@ -645,75 +618,6 @@ function ServiceForm(
               }
               action={<Switch checked={noIndex} onCheckedChange={setNoIndex} aria-label="Hide from search engines" />}
             />
-            <Section
-              title="Framing"
-              description={
-                <>
-                  Whether other pages may show the service in a frame, which clickjacking relies on.{" "}
-                  {FRAMING[framing].hint}
-                </>
-              }
-              action={
-                <Select value={framing} onValueChange={(v) => setFraming(v as Framing)}>
-                  <SelectTrigger className="w-40 shrink-0" aria-label="Framing">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent align="end">
-                    {(Object.keys(FRAMING) as Framing[]).map((f) => (
-                      <SelectItem key={f} value={f}>
-                        {FRAMING[f].label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              }
-            />
-            <Section
-              title="Request headers"
-              description="Sent to the service with every request, after authentication. Leave a value empty to remove a header the client sent. Values show up in Traefik's configuration."
-            >
-              {requestHeaders.length > 0 && (
-                <div className="space-y-2">
-                  {requestHeaders.map((h) => (
-                    <div key={h.key} className="flex gap-2">
-                      <Input
-                        value={h.name}
-                        onChange={(e) => setHeader(h.key, { name: e.target.value })}
-                        placeholder="X-Header-Name"
-                        aria-label="Header name"
-                        autoComplete="off"
-                        className="w-48 font-mono"
-                      />
-                      <Input
-                        value={h.value}
-                        onChange={(e) => setHeader(h.key, { value: e.target.value })}
-                        placeholder="value (empty removes it)"
-                        aria-label="Header value"
-                        autoComplete="off"
-                        className="flex-1 font-mono"
-                      />
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        aria-label={`Remove ${h.name || "header"}`}
-                        onClick={() => setRequestHeaders((hs) => hs.filter((x) => x.key !== h.key))}
-                      >
-                        <X />
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setRequestHeaders((hs) => [...hs, { key: nextKey++, name: "", value: "" }])}
-              >
-                <Plus /> Add header
-              </Button>
-            </Section>
           </TabsContent>
         </div>
       </Tabs>

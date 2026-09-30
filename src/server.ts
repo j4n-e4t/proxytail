@@ -16,13 +16,11 @@ import {
   clientCas,
   domains as domainStore,
   hosts,
-  NO_HEADERS,
   settings,
   type Alias,
   type BasicAuthUser,
   type ClientAuth,
   type ClientCa,
-  type HostHeaders,
   type ProxyHost,
   type ProxyHostInput,
 } from "./db";
@@ -47,7 +45,7 @@ import {
   tailscaleVersion,
   TailscaleError,
 } from "./tailscale";
-import { buildConfig, CLIENT_CERT_INFO_HEADER, rateLimitStatus, traefikStatus } from "./traefik";
+import { buildConfig, rateLimitStatus, traefikStatus } from "./traefik";
 
 class HttpError extends Error {
   constructor(
@@ -187,57 +185,8 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
     clientAuth,
     clientCaIds,
     clientCertHeaders: clientAuth !== "off" && !!raw.clientCertHeaders,
-    headers: validateHeaders(raw.headers),
+    noIndex: !!raw.noIndex,
   };
-}
-
-/** An HTTP header name (RFC 9110 token). */
-const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/;
-/**
- * Request headers a service can't set: connection-level ones, and those Traefik or proxytail manage, which a service may
- * trust (the client's address and the verified client certificate).
- */
-const RESERVED_HEADERS = new Set(
-  [
-    "host",
-    "connection",
-    "content-length",
-    "transfer-encoding",
-    "te",
-    "trailer",
-    "upgrade",
-    "keep-alive",
-    "proxy-connection",
-    "x-forwarded-for",
-    "x-forwarded-host",
-    "x-forwarded-port",
-    "x-forwarded-proto",
-    "x-forwarded-server",
-    "x-real-ip",
-    CLIENT_CERT_INFO_HEADER,
-  ].map((h) => h.toLowerCase()),
-);
-
-function validateHeaders(raw: any): HostHeaders {
-  if (raw == null) return NO_HEADERS;
-  const framing = raw.framing ?? "service";
-  if (!["service", "sameorigin", "deny"].includes(framing))
-    throw new HttpError(400, "Framing must be service, sameorigin or deny");
-  const requestHeaders: HostHeaders["requestHeaders"] = [];
-  for (const h of Array.isArray(raw.requestHeaders) ? raw.requestHeaders : []) {
-    const name = String(h?.name ?? "").trim();
-    const value = String(h?.value ?? "");
-    if (!name && !value) continue;
-    if (!HEADER_NAME_RE.test(name)) throw new HttpError(400, `Invalid header name "${name}"`);
-    if (RESERVED_HEADERS.has(name.toLowerCase())) throw new HttpError(400, `${name} is set by Traefik and can't be changed`);
-    if (requestHeaders.some((x) => x.name.toLowerCase() === name.toLowerCase()))
-      throw new HttpError(400, `${name} is listed twice`);
-    if (value.length > 1024 || /[\x00-\x08\x0a-\x1f\x7f]/.test(value))
-      throw new HttpError(400, `The value of ${name} must be one line of at most 1024 characters`);
-    requestHeaders.push({ name, value });
-  }
-  if (requestHeaders.length > 20) throw new HttpError(400, "A service can set at most 20 request headers");
-  return { noIndex: !!raw.noIndex, framing, requestHeaders };
 }
 
 const USERNAME_RE = /^[^\s:]{1,64}$/;
