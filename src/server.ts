@@ -18,6 +18,7 @@ import {
   hosts,
   NO_HEADERS,
   settings,
+  type Alias,
   type BasicAuthUser,
   type ClientAuth,
   type ClientCa,
@@ -92,10 +93,26 @@ function parseId(raw: string) {
 const DOMAIN_RE = /^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
 async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostInput> {
-  const domains: string[] = (Array.isArray(raw.domains) ? raw.domains : String(raw.domains ?? "").split(/[\s,]+/))
-    .map((d: unknown) => String(d).trim().toLowerCase())
+  const normalize = (d: unknown) => String(d ?? "").trim().toLowerCase();
+  const listed: string[] = (Array.isArray(raw.domains) ? raw.domains : String(raw.domains ?? "").split(/[\s,]+/))
+    .map(normalize)
     .filter(Boolean);
-  if (!domains.length) throw new HttpError(400, "At least one domain is required");
+  const hostname = listed[0];
+  if (!hostname) throw new HttpError(400, "A hostname is required");
+  // Aliases with their modes; a plain list of extra hostnames (older clients) means parallel aliases.
+  const rawAliases: { hostname?: unknown; mode?: unknown }[] = Array.isArray(raw.aliases)
+    ? raw.aliases
+    : listed.slice(1).map((h) => ({ hostname: h, mode: "parallel" }));
+  const aliases: Alias[] = [];
+  for (const a of rawAliases) {
+    const alias = normalize(a.hostname);
+    if (!alias) continue;
+    const mode = a.mode ?? "redirect";
+    if (mode !== "redirect" && mode !== "parallel") throw new HttpError(400, "An alias must redirect or be served in parallel");
+    if (alias === hostname || aliases.some((x) => x.hostname === alias)) throw new HttpError(400, `${alias} is listed twice`);
+    aliases.push({ hostname: alias, mode });
+  }
+  const domains = [hostname, ...aliases.map((a) => a.hostname)];
   for (const d of domains) {
     if (!DOMAIN_RE.test(d) || d.length > 253) throw new HttpError(400, `Invalid domain: ${d}`);
     if (d.startsWith("*.")) throw new HttpError(400, `Wildcard domains are not supported yet: ${d}`);
@@ -156,7 +173,8 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
   }
 
   return {
-    domains: [...new Set(domains)],
+    domains,
+    aliases,
     deviceId,
     deviceName,
     targetIp,

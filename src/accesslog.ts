@@ -62,7 +62,8 @@ interface TraefikEntry {
   Duration?: number;
 }
 
-const ROUTER_RE = /^proxytail-host-(\d+)@/;
+// The service's router, or the one for its redirect aliases.
+const ROUTER_RE = /^proxytail-host-(\d+)(?:-redirect)?@/;
 
 const insert = db.query(
   `INSERT INTO access_log (time, client_ip, host, host_id, status, duration_ms)

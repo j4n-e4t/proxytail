@@ -31,6 +31,8 @@ function requestHeaders(h: ProxyHost) {
   return list.length ? { headers: { customRequestHeaders: Object.fromEntries(list.map((x) => [x.name, x.value])) } } : null;
 }
 
+const hostRule = (hostnames: string[]) => hostnames.map((d) => `Host(\`${d}\`)`).join(" || ");
+
 export const routerName = (h: Pick<ProxyHost, "id">) => `proxytail-host-${h.id}`;
 
 /** Header the verified client certificate's details are forwarded in (URL-encoded, see Traefik's passTLSClientCert). */
@@ -69,8 +71,11 @@ export function buildConfig() {
     if (!h.enabled) continue;
     const name = routerName(h);
     const tls: Record<string, unknown> = { certResolver: CERT_RESOLVER };
+    const hostname = h.domains[0]!;
+    const parallel = h.aliases.filter((a) => a.mode === "parallel").map((a) => a.hostname);
+    const redirected = h.aliases.filter((a) => a.mode === "redirect").map((a) => a.hostname);
     const router: Record<string, unknown> = {
-      rule: h.domains.map((d) => `Host(\`${d}\`)`).join(" || "),
+      rule: hostRule([hostname, ...parallel]),
       entryPoints: ENTRYPOINTS,
       service: name,
       tls,
@@ -115,6 +120,11 @@ export function buildConfig() {
       };
       chain.push(`${name}-auth`);
     }
+    // Parallel aliases: the service sees its own hostname, whichever one the client asked for.
+    if (parallel.length) {
+      middlewares[`${name}-host`] = { headers: { customRequestHeaders: { Host: hostname } } };
+      chain.push(`${name}-host`);
+    }
     // Request headers come after basic auth, so a configured Authorization header can't pass the password check.
     const request = requestHeaders(h);
     if (request) {
@@ -137,6 +147,22 @@ export function buildConfig() {
     chain.push(HSTS_MIDDLEWARE);
     router.middlewares = chain;
     routers[name] = router;
+    // Redirect aliases get their own router (and certificate), which sends the client to the service's hostname. The
+    // port, path and query stay. Temporary, so browsers don't hold on to it if the alias changes; 307 keeps the method.
+    if (redirected.length) {
+      middlewares[`${name}-redirect`] = {
+        redirectRegex: { regex: "^https://[^/:]+(:[0-9]+)?(.*)$", replacement: `https://${hostname}\${1}\${2}`, permanent: false },
+      };
+      routers[`${name}-redirect`] = {
+        rule: hostRule(redirected),
+        entryPoints: ENTRYPOINTS,
+        // Never reached: the redirect answers every request.
+        service: name,
+        tls,
+        // HSTS first: the redirect answers the request itself, so nothing after it would run.
+        middlewares: [HSTS_MIDDLEWARE, `${name}-redirect`],
+      };
+    }
     const loadBalancer: Record<string, unknown> = {
       servers: [{ url: `${h.scheme}://${h.targetIp}:${h.targetPort}` }],
       passHostHeader: true,

@@ -175,7 +175,7 @@ export function HostsPage(props: {
               {shown.map((h) => {
                 const device = byId.get(h.deviceId);
                 const state = serviceState(h, traefik);
-                const extra = h.domains.length - 1;
+                const extra = h.aliases.length;
                 return (
                   <TableRow key={h.id}>
                     <TableCell className="py-3 pl-4">
@@ -207,8 +207,13 @@ export function HostsPage(props: {
                               {state.tone !== "success" && <StateLabel state={state} />}
                               {state.tone !== "success" && extra > 0 && <span className="text-muted-foreground"> · </span>}
                               {extra > 0 && (
-                                <span className="text-muted-foreground" title={h.domains.slice(1).join(", ")}>
-                                  +{extra} {extra === 1 ? "hostname" : "hostnames"}
+                                <span
+                                  className="text-muted-foreground"
+                                  title={h.aliases
+                                    .map((a) => `${a.hostname} (${a.mode === "redirect" ? "redirects" : "parallel"})`)
+                                    .join(", ")}
+                                >
+                                  +{extra} {extra === 1 ? "alias" : "aliases"}
                                 </span>
                               )}
                             </p>

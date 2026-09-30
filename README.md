@@ -60,7 +60,8 @@ Then, in the UI:
    public IP.
 2. **Domains:** add a domain and create the wildcard record it shows, e.g. `*.example.com A 203.0.113.10`. The domain is
    verified against public DNS resolvers.
-3. **Services:** pick a subdomain, a tailnet peer, and a port. The route goes live within about 5 seconds. The list
+3. **Services:** pick a subdomain, a tailnet peer, and a port, and optionally aliases (see [Aliases](#aliases)). The
+   route goes live within about 5 seconds. The list
    shows each service's last 24 hours (requests per hour, 5xx rate, 95th percentile response time) and the days left
    on its certificate, turning orange below 21 days and red below 7: Traefik renews at 30.
 4. Optionally, **Client CAs:** require client certificates for a service. See [Client certificates (mTLS)](#client-certificates-mtls).
@@ -72,6 +73,24 @@ Only peers tagged `tag:proxytail-backend` are listed and can be targeted. Change
 `TS_BACKEND_TAG`. Define the tag under `tagOwners` in your tailnet policy and apply it to each backend, e.g.
 `tailscale up --advertise-tags=tag:proxytail-backend`. The policy must also allow the proxy host to reach those peers
 (see [Security model](#security-model)).
+
+## Aliases
+
+A service has one hostname, and any number of aliases under your verified domains, each in one of two modes:
+
+- **Redirect** sends the visitor to the service's hostname, e.g. `www.example.com` to `example.com`. The port, path and
+  query string are kept. The redirect is temporary (`302`, or `307` for methods other than GET, which keeps a `POST`
+  a `POST`), so browsers don't hold on to it when you change the alias.
+- **Parallel** serves the service under the alias too, and rewrites the `Host` header to the service's hostname, so
+  the service only ever sees its own name. The path is untouched, and the name the client used is in
+  `X-Forwarded-Host`.
+
+Every alias gets its own Let's Encrypt certificate. Parallel aliases share the service's router, so authentication,
+rate limiting and headers apply to them as well; redirect aliases have a router of their own, with the service's client
+certificate requirement and HSTS. Requests to either count towards the service on the Requests page.
+
+Services created with several hostnames keep the first one, and the others become parallel aliases. Unlike before,
+the service now sees its own hostname for those, instead of the alias.
 
 ## Client certificates (mTLS)
 

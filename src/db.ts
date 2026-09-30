@@ -34,6 +34,10 @@ if (!hostColumns.includes("basic_auth")) {
   db.run("ALTER TABLE proxy_hosts ADD COLUMN basic_auth INTEGER NOT NULL DEFAULT 0");
   db.run("ALTER TABLE proxy_hosts ADD COLUMN basic_auth_users TEXT NOT NULL DEFAULT '[]'");
 }
+// Every hostname after the first became an alias, served in parallel unless set otherwise.
+if (!hostColumns.includes("alias_modes")) {
+  db.run("ALTER TABLE proxy_hosts ADD COLUMN alias_modes TEXT NOT NULL DEFAULT '{}'");
+}
 if (!hostColumns.includes("headers")) {
   db.run("ALTER TABLE proxy_hosts ADD COLUMN headers TEXT NOT NULL DEFAULT '{}'");
 }
@@ -96,6 +100,17 @@ export type Scheme = "http" | "https";
  */
 export type ClientAuth = "off" | "require" | "optional";
 
+/**
+ * How an alias hostname reaches the service. `redirect` sends the visitor to the service's hostname; `parallel` serves
+ * the service under the alias too, with the Host header rewritten to the service's hostname. The path is kept either way.
+ */
+export type AliasMode = "redirect" | "parallel";
+
+export interface Alias {
+  hostname: string;
+  mode: AliasMode;
+}
+
 /** Whether browsers may show a service inside a frame on another page: left to the service, same origin, or never. */
 export type Framing = "service" | "sameorigin" | "deny";
 
@@ -118,7 +133,10 @@ export interface BasicAuthUser {
 
 export interface ProxyHost {
   id: number;
+  /** Every hostname: the service's own first, then its aliases. */
   domains: string[];
+  /** The hostnames after the first, and how each reaches the service. */
+  aliases: Alias[];
   deviceId: string;
   deviceName: string;
   targetIp: string;
@@ -154,6 +172,7 @@ interface ProxyHostRow {
   client_auth: ClientAuth;
   client_cert_headers: number;
   headers: string;
+  alias_modes: string;
   created_at: string;
   updated_at: string;
 }
@@ -172,9 +191,12 @@ function caLinks(hostId?: number) {
 }
 
 function toHost(r: ProxyHostRow, links = caLinks(r.id)): ProxyHost {
+  const domains: string[] = JSON.parse(r.domains);
+  const modes: Record<string, AliasMode> = JSON.parse(r.alias_modes);
   return {
     id: r.id,
-    domains: JSON.parse(r.domains),
+    domains,
+    aliases: domains.slice(1).map((hostname) => ({ hostname, mode: modes[hostname] ?? "parallel" })),
     deviceId: r.device_id,
     deviceName: r.device_name,
     targetIp: r.target_ip,
@@ -196,6 +218,7 @@ function toHost(r: ProxyHostRow, links = caLinks(r.id)): ProxyHost {
 function toParams(h: ProxyHostInput) {
   return {
     domains: JSON.stringify(h.domains),
+    alias_modes: JSON.stringify(Object.fromEntries(h.aliases.map((a) => [a.hostname, a.mode]))),
     device_id: h.deviceId,
     device_name: h.deviceName,
     target_ip: h.targetIp,
@@ -237,9 +260,9 @@ export const hosts = {
     const row = db
       .query<ProxyHostRow, any>(
         `INSERT INTO proxy_hosts (domains, device_id, device_name, target_ip, target_port, scheme, insecure_skip_verify, enabled,
-           basic_auth, basic_auth_users, client_auth, client_cert_headers, headers)
+           basic_auth, basic_auth_users, client_auth, client_cert_headers, headers, alias_modes)
          VALUES ($domains, $device_id, $device_name, $target_ip, $target_port, $scheme, $insecure_skip_verify, $enabled,
-           $basic_auth, $basic_auth_users, $client_auth, $client_cert_headers, $headers)
+           $basic_auth, $basic_auth_users, $client_auth, $client_cert_headers, $headers, $alias_modes)
          RETURNING *`,
       )
       .get(toParams(h))!;
@@ -253,7 +276,7 @@ export const hosts = {
            target_ip = $target_ip, target_port = $target_port, scheme = $scheme,
            insecure_skip_verify = $insecure_skip_verify, enabled = $enabled, basic_auth = $basic_auth,
            basic_auth_users = $basic_auth_users, client_auth = $client_auth, client_cert_headers = $client_cert_headers,
-           headers = $headers, updated_at = datetime('now')
+           headers = $headers, alias_modes = $alias_modes, updated_at = datetime('now')
          WHERE id = $id RETURNING *`,
       )
       .get({ ...toParams(h), id });

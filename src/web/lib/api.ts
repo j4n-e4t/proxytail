@@ -1,8 +1,21 @@
 export type ClientAuth = "off" | "require" | "optional";
 
+/**
+ * How an alias reaches the service: `redirect` sends visitors to the service's hostname, `parallel` serves the service
+ * under the alias with the Host header rewritten to the service's hostname. The path is kept either way.
+ */
+export type AliasMode = "redirect" | "parallel";
+
+export interface Alias {
+  hostname: string;
+  mode: AliasMode;
+}
+
 export interface ProxyHost {
   id: number;
+  /** The service's hostname first, then its aliases. */
   domains: string[];
+  aliases: Alias[];
   deviceId: string;
   deviceName: string;
   targetIp: string;
@@ -34,6 +47,7 @@ export interface HostHeaders {
 export type ProxyHostDraft = Pick<
   ProxyHost,
     | "domains"
+  | "aliases"
   | "deviceId"
   | "targetPort"
   | "scheme"

@@ -19,6 +19,7 @@ import {
   type ClientAuth,
   type ClientCa,
   type Device,
+  type AliasMode,
   type Domain,
   type Framing,
   type ProxyHost,
@@ -100,7 +101,11 @@ function Section(props: {
 interface DomainRow {
   sub: string;
   base: string;
+  /** Aliases only: every row after the first. */
+  mode?: AliasMode;
 }
+
+const ALIAS_MODES: Record<AliasMode, string> = { redirect: "Redirect", parallel: "Parallel" };
 
 /** Split a hostname into subdomain + base, preferring registered domains (longest match). */
 function splitHostname(hostname: string, domains: Domain[]): DomainRow {
@@ -144,7 +149,12 @@ function ServiceForm(
   const verified = props.domains.filter((d) => d.verified);
   const defaultBase = verified[0]?.name ?? "";
   const [rows, setRows] = useState<DomainRow[]>(() =>
-    existing ? existing.domains.map((h) => splitHostname(h, props.domains)) : [{ sub: "", base: defaultBase }],
+    existing
+      ? [
+          splitHostname(existing.domains[0]!, props.domains),
+          ...existing.aliases.map((a) => ({ ...splitHostname(a.hostname, props.domains), mode: a.mode })),
+        ]
+      : [{ sub: "", base: defaultBase }],
   );
   const [deviceId, setDeviceId] = useState(existing?.deviceId ?? props.initialDeviceId ?? "");
   const [port, setPort] = useState(existing ? String(existing.targetPort) : "");
@@ -203,13 +213,14 @@ function ServiceForm(
       setTab(t);
       setError(message);
     };
-    if (rows.some((r) => !r.base)) return invalid("domains", "Pick a domain for every hostname.");
+    if (rows.some((r) => !r.base)) return invalid("domains", "Pick a domain for the hostname and every alias.");
     if (!deviceId) return invalid("target", "Pick the tailnet peer that runs this service.");
     if (!port) return invalid("target", "Enter the port your service is listening on.");
     if (clientAuth !== "off" && !caIds.length)
       return invalid("auth", "Pick a CA to verify client certificates against.");
     const draft: ProxyHostDraft = {
       domains: rows.map(joinHostname),
+      aliases: rows.slice(1).map((r) => ({ hostname: joinHostname(r), mode: r.mode ?? "redirect" })),
       deviceId,
       targetPort: Number(port),
       scheme,
@@ -245,6 +256,44 @@ function ServiceForm(
     }
   };
 
+  /** A subdomain field joined to a domain picker. A render function, not a component, so inputs keep their focus. */
+  const hostnameInput = (row: DomainRow, index: number) => (
+    <div className="flex min-w-0 flex-1">
+      <Input
+        autoFocus={index === 0 && !existing}
+        value={row.sub}
+        onChange={(e) => setRow(index, { sub: e.target.value.replace(/\s/g, "") })}
+        placeholder={index === 0 ? "app" : "www"}
+        aria-label={index === 0 ? "Subdomain" : "Alias subdomain"}
+        className="min-w-0 flex-1 rounded-r-none font-mono focus-visible:z-10"
+      />
+      <Select value={row.base} onValueChange={(base) => setRow(index, { base })}>
+        <SelectTrigger
+          aria-label="Domain"
+          className="max-w-[55%] min-w-40 rounded-l-none border-l-0 bg-muted/40 font-mono"
+        >
+          <span className="truncate">{row.base ? `.${row.base}` : "Select domain"}</span>
+        </SelectTrigger>
+        <SelectContent align="end">
+          {baseOptions.map((b) => (
+            <SelectItem key={b} value={b} className="font-mono">
+              .{b}
+              {!verified.some((d) => d.name === b) && (
+                <span className="font-sans text-xs text-muted-foreground">not verified</span>
+              )}
+            </SelectItem>
+          ))}
+          {pending.map((d) => (
+            <SelectItem key={d.name} value={d.name} disabled className="font-mono">
+              .{d.name}
+              <span className="font-sans text-xs text-muted-foreground">pending DNS</span>
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+
   const state = existing ? serviceState(existing, props.traefik) : null;
 
   return (
@@ -271,7 +320,7 @@ function ServiceForm(
             </div>
           )}
           <TabsList className="mt-3 w-full">
-            <TabsTrigger value="domains">Domains</TabsTrigger>
+            <TabsTrigger value="domains">Hostnames</TabsTrigger>
             <TabsTrigger value="target">Target</TabsTrigger>
             <TabsTrigger value="auth">
               Authentication
@@ -287,8 +336,8 @@ function ServiceForm(
         {/* Fixed height so the dialog doesn't jump when switching tabs. */}
         <div className="h-[26rem] max-h-[60vh] overflow-y-auto px-6 py-5">
           <TabsContent value="domains" className="space-y-5">
-            <Section title="Domains" description="Choose a subdomain on one of your verified domains.">
-              {baseOptions.length === 0 ? (
+            {baseOptions.length === 0 ? (
+              <Section title="Hostname" description="Choose a subdomain on one of your verified domains.">
                 <div className="flex items-center justify-between gap-4 rounded-lg border border-dashed p-4">
                   <p className="text-sm text-muted-foreground">
                     {pending.length
@@ -299,73 +348,74 @@ function ServiceForm(
                     <Globe /> Manage domains
                   </Button>
                 </div>
-              ) : (
-                <div className="space-y-2">
-                  {rows.map((r, i) => (
-                    <div key={i} className="flex gap-2">
-                      <div className="flex flex-1">
-                        <Input
-                          autoFocus={i === 0 && !existing}
-                          value={r.sub}
-                          onChange={(e) => setRow(i, { sub: e.target.value.replace(/\s/g, "") })}
-                          placeholder="app"
-                          aria-label="Subdomain"
-                          className="flex-1 rounded-r-none font-mono focus-visible:z-10"
-                        />
-                        <Select value={r.base} onValueChange={(base) => setRow(i, { base })}>
-                          <SelectTrigger
-                            aria-label="Domain"
-                            className="max-w-[55%] min-w-40 rounded-l-none border-l-0 bg-muted/40 font-mono"
-                          >
-                            <span className="truncate">{r.base ? `.${r.base}` : "Select domain"}</span>
-                          </SelectTrigger>
-                          <SelectContent align="end">
-                            {baseOptions.map((b) => (
-                              <SelectItem key={b} value={b} className="font-mono">
-                                .{b}
-                                {!verified.some((d) => d.name === b) && (
-                                  <span className="font-sans text-xs text-muted-foreground">not verified</span>
-                                )}
-                              </SelectItem>
-                            ))}
-                            {pending.map((d) => (
-                              <SelectItem key={d.name} value={d.name} disabled className="font-mono">
-                                .{d.name}
-                                <span className="font-sans text-xs text-muted-foreground">pending DNS</span>
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      {rows.length > 1 && (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="text-muted-foreground"
-                          onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}
-                          aria-label="Remove hostname"
-                        >
-                          <X />
-                        </Button>
-                      )}
+              </Section>
+            ) : (
+              <>
+                <Section
+                  title="Hostname"
+                  description="The service's address: a subdomain on one of your verified domains, or the domain itself with the subdomain left empty."
+                >
+                  {hostnameInput(rows[0]!, 0)}
+                </Section>
+
+                <Section
+                  title="Aliases"
+                  description={
+                    <>
+                      Other hostnames for this service. <strong>Redirect</strong> sends visitors to{" "}
+                      <span className="font-mono">{firstDomain}</span>. <strong>Parallel</strong> serves the service
+                      under the alias as well, and the service sees <span className="font-mono">{firstDomain}</span>.
+                      The path is kept either way.
+                    </>
+                  }
+                >
+                  {rows.length > 1 && (
+                    <div className="space-y-2">
+                      {rows.slice(1).map((r, j) => {
+                        const i = j + 1;
+                        return (
+                          <div key={i} className="flex gap-2">
+                            {hostnameInput(r, i)}
+                            <Select value={r.mode ?? "redirect"} onValueChange={(mode) => setRow(i, { mode: mode as AliasMode })}>
+                              <SelectTrigger className="w-32 shrink-0" aria-label="Alias mode">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent align="end">
+                                {(Object.keys(ALIAS_MODES) as AliasMode[]).map((m) => (
+                                  <SelectItem key={m} value={m}>
+                                    {ALIAS_MODES[m]}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="text-muted-foreground"
+                              onClick={() => setRows((rs) => rs.filter((_, k) => k !== i))}
+                              aria-label="Remove alias"
+                            >
+                              <X />
+                            </Button>
+                          </div>
+                        );
+                      })}
                     </div>
-                  ))}
-                  <div className="flex items-center justify-between gap-4">
-                    <p className="text-xs text-muted-foreground">Leave the subdomain empty to use the domain itself.</p>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="text-muted-foreground"
-                      onClick={() => setRows((rs) => [...rs, { sub: "", base: rs.at(-1)?.base ?? defaultBase }])}
-                    >
-                      <Plus /> Add hostname
-                    </Button>
-                  </div>
-                </div>
-              )}
-            </Section>
+                  )}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setRows((rs) => [...rs, { sub: "", base: rs[0]?.base || defaultBase, mode: "redirect" }])
+                    }
+                  >
+                    <Plus /> Add alias
+                  </Button>
+                </Section>
+              </>
+            )}
           </TabsContent>
 
           <TabsContent value="target" className="space-y-5">
