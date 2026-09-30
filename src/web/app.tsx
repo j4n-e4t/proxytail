@@ -235,7 +235,6 @@ function Console() {
       label: "Monitoring",
       items: [
         { target: "requests", label: "Requests", icon: Activity },
-        { target: "settings/request-log", label: "Request log", icon: ScrollText },
       ],
     },
     {
@@ -245,6 +244,7 @@ function Console() {
         { target: "settings", label: "General", icon: SlidersHorizontal },
         { target: "settings/tailscale", label: "Tailscale", icon: TailscaleIcon },
         { target: "settings/traefik", label: "Traefik", icon: TraefikIcon },
+        { target: "settings/request-log", label: "Request log", icon: ScrollText },
       ],
     },
   ];
