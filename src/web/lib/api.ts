@@ -65,12 +65,10 @@ export interface BasicAuthUser {
   hostIds: number[];
 }
 
-export type CaptchaProvider = "turnstile" | "hcaptcha";
-
+/** A Cloudflare Turnstile widget. */
 export interface Captcha {
   id: number;
   name: string;
-  provider: CaptchaProvider;
   siteKey: string;
   /** Seconds a visitor who solved it is let through before being asked again. */
   lifetime: number;
@@ -83,7 +81,6 @@ export interface Captcha {
 /** A new captcha, or changes to one. An empty secret key keeps the current one. */
 export interface CaptchaDraft {
   name: string;
-  provider: CaptchaProvider;
   siteKey: string;
   secretKey?: string;
   lifetime: number;

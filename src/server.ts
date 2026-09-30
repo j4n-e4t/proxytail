@@ -12,7 +12,7 @@ import {
   type Filters,
   type Range,
 } from "./accesslog";
-import { captchaCheck, checkSecretKey, LIFETIME, PROVIDERS } from "./captcha";
+import { captchaCheck, checkSecretKey, LIFETIME } from "./captcha";
 import {
   basicAuthUsers,
   captchas,
@@ -302,36 +302,28 @@ function getCaptcha(raw: string) {
   return c;
 }
 
-/** Site keys go into the challenge page; both providers' keys are letters, digits, dashes and underscores. */
+/** Site keys go into the challenge page; Turnstile's are letters, digits, dashes and underscores. */
 const SITE_KEY_RE = /^[\w-]{1,128}$/;
 const SECRET_KEY_RE = /^[\x21-\x7e]{1,256}$/;
 
 /** A new captcha (`existing` undefined), or changes to one. An empty secret key keeps the current one. */
 async function validateCaptcha(raw: Record<string, unknown>, existing?: Captcha): Promise<CaptchaInput> {
   const name = validateName(raw.name ?? existing?.name, "Name");
-  const provider = raw.provider ?? existing?.provider;
-  if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider))
-    throw new HttpError(400, `Provider must be one of ${Object.keys(PROVIDERS).join(", ")}`);
   const siteKey = String(raw.siteKey ?? existing?.siteKey ?? "").trim();
-  if (!SITE_KEY_RE.test(siteKey)) throw new HttpError(400, "Enter the site key from your provider's dashboard");
+  if (!SITE_KEY_RE.test(siteKey)) throw new HttpError(400, "Enter the widget's site key from the Cloudflare dashboard");
   const newSecret = typeof raw.secretKey === "string" ? raw.secretKey.trim() : "";
-  // A secret key belongs to its provider: switching providers takes a new one.
-  if (!newSecret && (!existing || existing.provider !== provider))
-    throw new HttpError(400, "Enter the secret key from your provider's dashboard");
+  if (!newSecret && !existing) throw new HttpError(400, "Enter the widget's secret key from the Cloudflare dashboard");
   const secretKey = newSecret || existing!.secretKey;
   if (!SECRET_KEY_RE.test(secretKey)) throw new HttpError(400, "The secret key can't contain spaces");
   const lifetime = Number(raw.lifetime ?? existing?.lifetime ?? LIFETIME.default);
   if (!Number.isInteger(lifetime) || lifetime < LIFETIME.min || lifetime > LIFETIME.max)
     throw new HttpError(400, "Visitors must be remembered for 5 minutes to 30 days");
-  const input: CaptchaInput = { name, provider: provider as CaptchaInput["provider"], siteKey, secretKey, lifetime };
-  // Only ask the provider when the keys change, so renaming works while it's unreachable.
-  const keysChanged =
-    !existing || existing.provider !== input.provider || existing.siteKey !== siteKey || existing.secretKey !== secretKey;
-  if (keysChanged) {
-    const rejected = await checkSecretKey(input);
+  // Only ask Cloudflare when the secret changes, so other changes work while it's unreachable.
+  if (secretKey !== existing?.secretKey) {
+    const rejected = await checkSecretKey(secretKey);
     if (rejected) throw new HttpError(400, rejected);
   }
-  return input;
+  return { name, siteKey, secretKey, lifetime };
 }
 
 function validateName(raw: unknown, what: string) {

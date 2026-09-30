@@ -14,7 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DeviceBadge } from "@/components/device-badge";
 import { DevicePicker } from "@/components/device-picker";
 import { ServiceIcon, serviceState } from "@/components/status";
-import { lifetimeLabel, PROVIDERS } from "@/pages/captchas";
+import { lifetimeLabel } from "@/pages/captchas";
 import {
   api,
   type BasicAuthUser,
@@ -467,7 +467,7 @@ function ServiceForm(
           <TabsContent value="auth" className="space-y-5">
             <Section
               title="Captcha"
-              description="Visitors solve a Turnstile or hCaptcha challenge before reaching the service, and aren't asked again for a while."
+              description="Visitors solve a Cloudflare Turnstile challenge before reaching the service, and aren't asked again for a while."
               action={<Switch checked={captchaOn} onCheckedChange={toggleCaptcha} aria-label="Require a captcha" />}
             >
               {captchaOn &&
@@ -489,7 +489,7 @@ function ServiceForm(
                           <SelectItem key={c.id} value={String(c.id)}>
                             {c.name}
                             <span className="text-xs text-muted-foreground">
-                              {PROVIDERS[c.provider].label}, remembers visitors for {lifetimeLabel(c.lifetime)}
+                              Remembers visitors for {lifetimeLabel(c.lifetime)}
                             </span>
                           </SelectItem>
                         ))}
@@ -497,7 +497,7 @@ function ServiceForm(
                     </Select>
                     <p className="text-xs text-muted-foreground">
                       Allow <span className="font-mono">{firstDomain}</span> and its parallel aliases in the widget's
-                      hostnames at your provider. Scripts and API clients without a browser can't get through.{" "}
+                      hostnames in Cloudflare. Scripts and API clients without a browser can't get through.{" "}
                       <button type="button" className="underline" onClick={props.onOpenCaptchas}>
                         Manage captchas
                       </button>

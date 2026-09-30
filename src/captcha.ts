@@ -1,14 +1,14 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { captchas, hosts, settings, type Captcha, type CaptchaProvider } from "./db";
+import { captchas, hosts, settings, type Captcha } from "./db";
 
 /**
- * Captchas in front of services, with Cloudflare Turnstile or hCaptcha. Traefik asks proxytail about every request to
+ * Captchas in front of services, with Cloudflare Turnstile. Traefik asks proxytail about every request to
  * a service with a captcha (a forwardAuth middleware), and proxytail answers:
  *
  * - with 200, which lets the request through, when it carries a valid clearance cookie;
  * - with a challenge page (403) otherwise. The visitor solves the captcha there, and the page sends the token to
  *   CAPTCHA_PATH on the service's own hostname. That request reaches proxytail through forwardAuth as well: proxytail
- *   checks the token with the provider, sets the clearance cookie and redirects back (303).
+ *   checks the token with Cloudflare, sets the clearance cookie and redirects back (303).
  *
  * Nothing but forwardAuth calls reach proxytail, so it stays off the internet. The clearance cookie is signed with a
  * key only proxytail knows, and is valid for one service and captcha, for the captcha's lifetime.
@@ -22,40 +22,14 @@ const COOKIE = "__Host-proxytail-captcha";
 
 export const LIFETIME = { min: 5 * 60, max: 30 * 86_400, default: 86_400 };
 
-interface ProviderInfo {
-  label: string;
-  verifyUrl: string;
-  script: string;
-  /** Class of the widget's element, which renders it without further script. */
-  widgetClass: string;
-  /** Form field the widget puts its token in. */
-  tokenField: string;
-  /** Where the page may load scripts, frames and styles from, for its CSP. */
-  origins: string[];
-  /** The providers' test secrets, which accept dummy tokens from any hostname. */
-  testSecrets: RegExp;
-}
-
-export const PROVIDERS: Record<CaptchaProvider, ProviderInfo> = {
-  turnstile: {
-    label: "Cloudflare Turnstile",
-    verifyUrl: "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-    script: "https://challenges.cloudflare.com/turnstile/v0/api.js",
-    widgetClass: "cf-turnstile",
-    tokenField: "cf-turnstile-response",
-    origins: ["https://challenges.cloudflare.com"],
-    testSecrets: /^[123]x0{31}AA$/,
-  },
-  hcaptcha: {
-    label: "hCaptcha",
-    verifyUrl: "https://api.hcaptcha.com/siteverify",
-    script: "https://js.hcaptcha.com/1/api.js",
-    widgetClass: "h-captcha",
-    tokenField: "h-captcha-response",
-    origins: ["https://hcaptcha.com", "https://*.hcaptcha.com"],
-    testSecrets: /^0x0{40}$/,
-  },
-};
+const VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+const SCRIPT_URL = "https://challenges.cloudflare.com/turnstile/v0/api.js";
+/** Where the page loads the widget's script and frame from, for its CSP. */
+const TURNSTILE_ORIGIN = "https://challenges.cloudflare.com";
+/** Form field the widget puts its token in. */
+const TOKEN_FIELD = "cf-turnstile-response";
+/** Turnstile's test secrets, which accept dummy tokens from any hostname and report `example.com` for it. */
+const TEST_SECRET_RE = /^[123]x0{31}AA$/;
 
 interface SiteverifyResult {
   success: boolean;
@@ -63,48 +37,30 @@ interface SiteverifyResult {
   "error-codes"?: string[];
 }
 
-/** Asks the provider whether a token is valid. Throws if the provider can't be reached. */
-async function siteverify(
-  c: Pick<Captcha, "provider" | "siteKey" | "secretKey">,
-  token: string,
-  remoteIp?: string,
-): Promise<SiteverifyResult> {
-  const form = new URLSearchParams({ secret: c.secretKey, response: token });
+/** Asks Cloudflare whether a token is valid. Throws if Cloudflare can't be reached. */
+async function siteverify(secretKey: string, token: string, remoteIp?: string): Promise<SiteverifyResult> {
+  const form = new URLSearchParams({ secret: secretKey, response: token });
   if (remoteIp) form.set("remoteip", remoteIp);
-  // hCaptcha also checks that the site key belongs to the secret; Turnstile's secrets belong to one widget anyway.
-  if (c.provider === "hcaptcha") form.set("sitekey", c.siteKey);
-  const res = await fetch(PROVIDERS[c.provider].verifyUrl, { method: "POST", body: form, signal: AbortSignal.timeout(10_000) });
-  // Turnstile answers a wrong secret with 400 and the reason in the body, like any other failure.
+  const res = await fetch(VERIFY_URL, { method: "POST", body: form, signal: AbortSignal.timeout(10_000) });
+  // A wrong secret is answered with 400 and the reason in the body, like any other failure.
   const result = (await res.json().catch(() => null)) as SiteverifyResult | null;
-  if (typeof result?.success !== "boolean") throw new Error(`${PROVIDERS[c.provider].label} answered ${res.status}`);
+  if (typeof result?.success !== "boolean") throw new Error(`Cloudflare answered ${res.status}`);
   return result;
 }
 
 /**
- * Checks a secret key with the provider before it's saved, with a token that can't be valid: Turnstile then complains
- * about the secret if it's wrong, and about the token otherwise. hCaptcha only ever complains about the token, so a
- * wrong hCaptcha secret shows once someone solves the captcha. Returns why the key is rejected, or null.
+ * Checks a secret key with Cloudflare before it's saved, with a token that can't be valid: Cloudflare then complains
+ * about the secret if it's wrong, and about the token otherwise. Returns why the key is rejected, or null.
  */
-export async function checkSecretKey(c: Pick<Captcha, "provider" | "siteKey" | "secretKey">): Promise<string | null> {
-  const label = PROVIDERS[c.provider].label;
+export async function checkSecretKey(secretKey: string): Promise<string | null> {
   let result: SiteverifyResult;
   try {
-    result = await siteverify(c, "proxytail-secret-key-check");
+    result = await siteverify(secretKey, "proxytail-secret-key-check");
   } catch (e) {
-    return `Couldn't reach ${label} to check the secret key: ${(e as Error).message}`;
+    return `Couldn't reach Cloudflare to check the secret key: ${(e as Error).message}`;
   }
-  const codes = result["error-codes"] ?? [];
-  if (codes.includes("invalid-input-secret")) return `${label} doesn't accept this secret key`;
-  if (codes.includes("sitekey-secret-mismatch")) return `The site key doesn't belong to this secret key's ${label} account`;
-  if (codes.includes("invalid-sitekey")) return `${label} doesn't know this site key`;
+  if (result["error-codes"]?.includes("invalid-input-secret")) return "Cloudflare doesn't accept this secret key";
   return null;
-}
-
-/** Messages for the challenge page, by the providers' error codes. */
-function tokenError(codes: string[]) {
-  if (codes.includes("timeout-or-duplicate") || codes.includes("expired-input-response") || codes.includes("already-seen-response"))
-    return "The check expired. Please try again.";
-  return "The check didn't pass. Please try again.";
 }
 
 /** The key clearance cookies are signed with, generated on first use and kept in the database. */
@@ -159,18 +115,18 @@ function safeReturn(raw: string | null | undefined) {
 
 const noStore = { "Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow" };
 
-/** The page visitors solve the captcha on. It's served in place of what they asked for, with status 403. */
-function challengePage(c: Captcha, hostname: string, returnTo: string, error?: string) {
-  const p = PROVIDERS[c.provider];
+/**
+ * The page visitors solve the captcha on, served in place of what they asked for, with status 403: nothing but the
+ * widget and a line of text, black or white with the visitor's color scheme.
+ */
+function challengePage(c: Captcha, returnTo: string) {
   const nonce = randomBytes(16).toString("base64");
-  const origins = p.origins.join(" ");
   const csp = [
     "default-src 'none'",
-    `script-src 'nonce-${nonce}' ${origins}`,
-    `frame-src ${origins}`,
-    `connect-src ${origins}`,
-    `style-src 'unsafe-inline' ${origins}`,
-    "img-src data:",
+    `script-src 'nonce-${nonce}' ${TURNSTILE_ORIGIN}`,
+    `frame-src ${TURNSTILE_ORIGIN}`,
+    `connect-src ${TURNSTILE_ORIGIN}`,
+    "style-src 'unsafe-inline'",
     "form-action 'self'",
     "base-uri 'none'",
     "frame-ancestors 'none'",
@@ -181,41 +137,27 @@ function challengePage(c: Captcha, hostname: string, returnTo: string, error?: s
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>Just a moment…</title>
+<title>Verifying request</title>
 <style>
-  :root { color-scheme: light dark; --bg: #f8fafc; --card: #fff; --fg: #0f172a; --muted: #64748b; --border: #e2e8f0; --danger: #dc2626; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #020617; --card: #0f172a; --fg: #f1f5f9; --muted: #94a3b8; --border: #1e293b; --danger: #f87171; }
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px;
-    background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  main { width: 100%; max-width: 380px; background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-    padding: 28px 24px; text-align: center; }
-  h1 { margin: 0 0 6px; font-size: 18px; font-weight: 600; }
-  p { margin: 0; color: var(--muted); }
-  .host { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--fg); overflow-wrap: anywhere; }
-  .widget { margin-top: 20px; min-height: 78px; display: flex; justify-content: center; }
-  .error { margin-top: 16px; color: var(--danger); }
+  :root { color-scheme: light dark; }
+  body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 20px; padding: 16px; box-sizing: border-box; background: #fff; color: #000;
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  @media (prefers-color-scheme: dark) { body { background: #000; color: #fff; } }
+  p { margin: 0; }
+  form { min-height: 65px; }
 </style>
 </head>
 <body>
-<main>
-  <h1>Checking that you're human</h1>
-  <p><span class="host">${escapeHtml(hostname)}</span> asks you to complete a quick check before continuing.</p>
-  <form id="captcha" method="get" action="${VERIFY_PATH}">
-    <input type="hidden" name="return" value="${escapeHtml(returnTo)}">
-    <div class="widget"><div class="${p.widgetClass}" data-sitekey="${escapeHtml(c.siteKey)}" data-callback="proxytailSolved"></div></div>
-  </form>
-  ${error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : ""}
-  <noscript><p class="error">Turn on JavaScript to continue.</p></noscript>
-</main>
+<p>Verifying request</p>
+<form id="captcha" method="get" action="${VERIFY_PATH}">
+  <input type="hidden" name="return" value="${escapeHtml(returnTo)}">
+  <div class="cf-turnstile" data-sitekey="${escapeHtml(c.siteKey)}" data-callback="proxytailSolved"></div>
+</form>
 <script nonce="${nonce}">
   function proxytailSolved() { document.getElementById("captcha").submit(); }
-  if (matchMedia("(prefers-color-scheme: dark)").matches)
-    document.querySelector("[data-sitekey]").setAttribute("data-theme", "dark");
 </script>
-<script nonce="${nonce}" src="${p.script}" async defer></script>
+<script nonce="${nonce}" src="${SCRIPT_URL}" async defer></script>
 </body>
 </html>`;
   return new Response(html, {
@@ -226,7 +168,7 @@ function challengePage(c: Captcha, hostname: string, returnTo: string, error?: s
       "Content-Security-Policy": csp,
       "X-Frame-Options": "DENY",
       "X-Content-Type-Options": "nosniff",
-      // The provider sees the origin, never the path and query the visitor asked for.
+      // Cloudflare sees the origin, never the path and query the visitor asked for.
       "Referrer-Policy": "strict-origin",
     },
   });
@@ -261,20 +203,19 @@ export async function captchaCheck(req: Request, hostId: number): Promise<Respon
   const url = new URL(uri, "https://invalid");
   if (url.pathname === VERIFY_PATH) {
     const returnTo = safeReturn(url.searchParams.get("return"));
-    const token = url.searchParams.get(PROVIDERS[c.provider].tokenField);
-    if (!token) return challengePage(c, hostname, returnTo, "The check didn't complete. Please try again.");
+    const token = url.searchParams.get(TOKEN_FIELD);
+    // A missing or rejected token gets a fresh widget to solve.
+    if (!token) return challengePage(c, returnTo);
     let result: SiteverifyResult;
     try {
-      result = await siteverify(c, token, clientIp);
+      result = await siteverify(c.secretKey, token, clientIp);
     } catch (e) {
       console.error(`Captcha for ${hostname}: ${(e as Error).message}`);
-      return challengePage(c, hostname, returnTo, "The check couldn't be verified right now. Please try again in a moment.");
+      return challengePage(c, returnTo);
     }
     // A token solved on another site with the same widget doesn't count. The test secrets report a fixed hostname.
-    const hostMatches =
-      !result.hostname || result.hostname === hostname || PROVIDERS[c.provider].testSecrets.test(c.secretKey);
-    if (!result.success || !hostMatches)
-      return challengePage(c, hostname, returnTo, tokenError(result.success ? [] : (result["error-codes"] ?? [])));
+    const hostMatches = !result.hostname || result.hostname === hostname || TEST_SECRET_RE.test(c.secretKey);
+    if (!result.success || !hostMatches) return challengePage(c, returnTo);
     return new Response(null, {
       status: 303,
       headers: {
@@ -288,5 +229,5 @@ export async function captchaCheck(req: Request, hostId: number): Promise<Respon
 
   if (validClearance(cookieValue(req, COOKIE), hostId, c)) return new Response(null, { status: 200 });
   const wantsPage = (method === "GET" || method === "HEAD") && (h.get("accept") ?? "").includes("text/html");
-  return wantsPage ? challengePage(c, hostname, safeReturn(uri)) : blocked();
+  return wantsPage ? challengePage(c, safeReturn(uri)) : blocked();
 }

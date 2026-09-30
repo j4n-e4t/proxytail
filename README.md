@@ -141,21 +141,21 @@ certificates.
 ## Captchas
 
 A service can ask visitors to solve a [Cloudflare Turnstile](https://www.cloudflare.com/application-services/products/turnstile/)
-or [hCaptcha](https://www.hcaptcha.com/) challenge before any request reaches it, which keeps out bots and scanners.
-Captchas are managed on their own page and attached to services, like basic auth users:
+challenge before any request reaches it, which keeps out bots and scanners. Captchas are managed on their own page and
+attached to services, like basic auth users:
 
-1. At your provider, create a widget (Turnstile) or site (hCaptcha) and allow the hostnames of the services you'll
-   attach it to, including parallel aliases.
+1. In the Cloudflare dashboard, create a Turnstile widget and allow the hostnames of the services you'll attach it
+   to, including parallel aliases.
 2. **Security → Captchas:** add its site key and secret key, and how long visitors are remembered (30 minutes to
-   30 days, 1 day by default). proxytail checks a Turnstile secret key with Cloudflare when you save it. hCaptcha
-   only reports a wrong secret key once someone solves the captcha, so try the service afterwards.
+   30 days, 1 day by default). proxytail checks the secret key with Cloudflare when you save it.
 3. **Services:** turn on **Captcha** in the Authentication tab and pick one.
 
-A visitor without a clearance gets a challenge page (`403`) in place of what they asked for. Once they solve it, the
-page sends the token to `/.well-known/proxytail-captcha/verify` on the service's own hostname; proxytail checks it
-with the provider, sets a cookie and sends the visitor back where they were. Requests that aren't a browser loading a
-page, e.g. API clients, scripts and images, get a plain `403` without a clearance, so a captcha suits services people
-open in a browser.
+A visitor without a clearance gets a challenge page (`403`) in place of what they asked for: black or white, following
+their color scheme, with the widget and "Verifying request". Once they solve it, the page sends the token to
+`/.well-known/proxytail-captcha/verify` on the service's own hostname; proxytail checks it with Cloudflare, sets a
+cookie and sends the visitor back where they were. A token that doesn't pass gets a fresh widget. Requests that aren't
+a browser loading a page, e.g. API clients, scripts and images, get a plain `403` without a clearance, so a captcha
+suits services people open in a browser.
 
 How it works:
 
@@ -171,17 +171,16 @@ How it works:
   only valid for that service and captcha until it expires. Shortening a captcha's lifetime applies to cookies issued
   before, too; switching a service to another captcha asks everyone again. The service receives the cookie with the
   rest of the `Cookie` header.
-- Tokens are single-use and checked with the provider together with the client IP. A token solved on another
-  hostname is rejected, except with the providers' test keys, which report a fixed hostname.
-- The challenge page loads the provider's script and nothing else, under a strict Content Security Policy, and sends
-  the provider its origin but not the path or query string the visitor asked for.
+- Tokens are single-use and checked with Cloudflare together with the client IP. A token solved on another hostname
+  is rejected, except with Cloudflare's test keys, which report a fixed hostname.
+- The challenge page loads Turnstile's script and nothing else, under a strict Content Security Policy, and sends
+  Cloudflare its origin but not the path or query string the visitor asked for.
 - A captcha still used by a service can't be deleted, and a service can't be saved with a captcha that no longer
   exists. Should a service ever end up with a captcha that's gone, proxytail doesn't route it, as with CAs and users.
 - Services with a captcha need proxytail to be up: while Traefik can't reach it, they answer `500`. Services without
   one are unaffected.
-- To try it out, use the providers' test keys: Turnstile's site key `1x00000000000000000000AA` with the secret key
-  `1x0000000000000000000000000000000AA`, or hCaptcha's site key `10000000-ffff-ffff-ffff-000000000001` with the secret
-  key `0x0000000000000000000000000000000000000000`. They pass every visitor, so switch to real keys afterwards.
+- To try it out, use Cloudflare's test keys: the site key `1x00000000000000000000AA` with the secret key
+  `1x0000000000000000000000000000000AA`. They pass every visitor, so switch to real keys afterwards.
 
 ## Hiding from search engines
 

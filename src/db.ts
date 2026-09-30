@@ -28,13 +28,12 @@ db.run(`
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `);
-// Captchas, shared by the services they're attached to. `secret_key` is the provider's secret for verifying solved
-// challenges; it never leaves the server.
+// Captchas (Cloudflare Turnstile widgets), shared by the services they're attached to. `secret_key` verifies solved
+// challenges with Cloudflare; it never leaves the server.
 db.run(`
   CREATE TABLE IF NOT EXISTS captchas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
-    provider TEXT NOT NULL,
     site_key TEXT NOT NULL,
     secret_key TEXT NOT NULL,
     lifetime INTEGER NOT NULL,
@@ -42,6 +41,10 @@ db.run(`
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `);
+// hCaptcha was dropped: every captcha is a Turnstile widget.
+if (db.query<{ name: string }, []>("PRAGMA table_info(captchas)").all().some((c) => c.name === "provider")) {
+  db.run("ALTER TABLE captchas DROP COLUMN provider");
+}
 
 // Columns added after the initial release.
 const hostColumns = db.query<{ name: string }, []>("PRAGMA table_info(proxy_hosts)").all().map((c) => c.name);
@@ -181,16 +184,12 @@ export interface Alias {
   mode: AliasMode;
 }
 
-/** Where visitors solve a captcha: Cloudflare Turnstile or hCaptcha. */
-export type CaptchaProvider = "turnstile" | "hcaptcha";
-
-/** A captcha widget at its provider, shared by the services it's attached to. */
+/** A Cloudflare Turnstile widget, shared by the services it's attached to. */
 export interface Captcha {
   id: number;
   name: string;
-  provider: CaptchaProvider;
   siteKey: string;
-  /** The provider's secret for verifying solved challenges. Never sent to the browser. */
+  /** Cloudflare's secret for verifying solved challenges. Never sent to the browser. */
   secretKey: string;
   /** Seconds a visitor who solved it can use the service before being asked again. */
   lifetime: number;
@@ -566,7 +565,6 @@ export const basicAuthUsers = {
 interface CaptchaRow {
   id: number;
   name: string;
-  provider: CaptchaProvider;
   site_key: string;
   secret_key: string;
   lifetime: number;
@@ -577,7 +575,6 @@ interface CaptchaRow {
 const toCaptcha = (r: CaptchaRow): Captcha => ({
   id: r.id,
   name: r.name,
-  provider: r.provider,
   siteKey: r.site_key,
   secretKey: r.secret_key,
   lifetime: r.lifetime,
@@ -589,7 +586,6 @@ export type CaptchaInput = Omit<Captcha, "id" | "createdAt" | "updatedAt">;
 
 const captchaParams = (c: CaptchaInput) => ({
   name: c.name,
-  provider: c.provider,
   site_key: c.siteKey,
   secret_key: c.secretKey,
   lifetime: c.lifetime,
@@ -617,8 +613,8 @@ export const captchas = {
     return toCaptcha(
       db
         .query<CaptchaRow, any>(
-          `INSERT INTO captchas (name, provider, site_key, secret_key, lifetime)
-           VALUES ($name, $provider, $site_key, $secret_key, $lifetime) RETURNING *`,
+          `INSERT INTO captchas (name, site_key, secret_key, lifetime)
+           VALUES ($name, $site_key, $secret_key, $lifetime) RETURNING *`,
         )
         .get(captchaParams(c))!,
     );
@@ -626,7 +622,7 @@ export const captchas = {
   update(id: number, c: CaptchaInput): Captcha | null {
     const row = db
       .query<CaptchaRow, any>(
-        `UPDATE captchas SET name = $name, provider = $provider, site_key = $site_key, secret_key = $secret_key,
+        `UPDATE captchas SET name = $name, site_key = $site_key, secret_key = $secret_key,
            lifetime = $lifetime, updated_at = datetime('now')
          WHERE id = $id RETURNING *`,
       )

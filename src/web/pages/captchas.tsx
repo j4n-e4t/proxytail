@@ -12,7 +12,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -29,12 +28,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PageHeader } from "@/components/page-header";
-import { api, type Captcha, type CaptchaProvider, type ProxyHost } from "@/lib/api";
+import { api, type Captcha, type ProxyHost } from "@/lib/api";
 
-export const PROVIDERS: Record<CaptchaProvider, { label: string; dashboard: string }> = {
-  turnstile: { label: "Cloudflare Turnstile", dashboard: "https://dash.cloudflare.com/?to=/:account/turnstile" },
-  hcaptcha: { label: "hCaptcha", dashboard: "https://dashboard.hcaptcha.com/sites" },
-};
+const DASHBOARD = "https://dash.cloudflare.com/?to=/:account/turnstile";
 
 /** How long a visitor who solved the captcha is let through, in seconds. */
 const LIFETIMES: [number, string][] = [
@@ -63,7 +59,6 @@ function CaptchaDialog(props: {
 }) {
   const { captcha } = props;
   const [name, setName] = useState("");
-  const [provider, setProvider] = useState<CaptchaProvider>("turnstile");
   const [siteKey, setSiteKey] = useState("");
   const [secretKey, setSecretKey] = useState("");
   const [lifetime, setLifetime] = useState(86_400);
@@ -73,22 +68,20 @@ function CaptchaDialog(props: {
   useEffect(() => {
     if (!props.open) return;
     setName(captcha?.name ?? "");
-    setProvider(captcha?.provider ?? "turnstile");
     setSiteKey(captcha?.siteKey ?? "");
     setSecretKey("");
     setLifetime(captcha?.lifetime ?? 86_400);
     setError(null);
   }, [props.open, captcha]);
 
-  // A secret key belongs to one provider, so switching providers takes a new one.
-  const needsSecret = !captcha || captcha.provider !== provider;
+  const needsSecret = !captcha;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const draft = { name, provider, siteKey, secretKey: secretKey || undefined, lifetime };
+      const draft = { name, siteKey, secretKey: secretKey || undefined, lifetime };
       const saved = captcha ? await api.updateCaptcha(captcha.id, draft) : await api.createCaptcha(draft);
       toast.success(captcha ? `Saved ${saved.name}` : `Added ${saved.name}`);
       props.onSaved();
@@ -134,38 +127,23 @@ function CaptchaDialog(props: {
               />
             </div>
             <div className="grid gap-2">
-              <Label>Provider</Label>
-              <Select value={provider} onValueChange={(v) => setProvider(v as CaptchaProvider)}>
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {(Object.keys(PROVIDERS) as CaptchaProvider[]).map((p) => (
-                    <SelectItem key={p} value={p}>
-                      {PROVIDERS[p].label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                Create a widget in the{" "}
-                <a href={PROVIDERS[provider].dashboard} target="_blank" rel="noreferrer" className="underline">
-                  {PROVIDERS[provider].label} dashboard
-                </a>{" "}
-                and allow the hostnames of the services you'll attach it to.
-              </p>
-            </div>
-            <div className="grid gap-2">
               <Label htmlFor="captcha-site-key">Site key</Label>
               <Input
                 id="captcha-site-key"
                 value={siteKey}
                 onChange={(e) => setSiteKey(e.target.value.trim())}
-                placeholder={provider === "turnstile" ? "0x4AAAAAAA…" : "10000000-ffff-ffff-ffff-000000000001"}
+                placeholder="0x4AAAAAAA…"
                 autoComplete="off"
                 className="h-10 font-mono"
                 required
               />
+              <p className="text-xs text-muted-foreground">
+                Create a widget in the{" "}
+                <a href={DASHBOARD} target="_blank" rel="noreferrer" className="underline">
+                  Cloudflare Turnstile dashboard
+                </a>{" "}
+                and allow the hostnames of the services you'll attach it to.
+              </p>
             </div>
             <div className="grid gap-2">
               <Label htmlFor="captcha-secret-key">{needsSecret ? "Secret key" : "New secret key"}</Label>
@@ -180,9 +158,7 @@ function CaptchaDialog(props: {
                 required={needsSecret}
               />
               <p className="text-xs text-muted-foreground">
-                {provider === "turnstile"
-                  ? "Checked with Cloudflare when you save. It can't be shown again."
-                  : "It can't be shown again. hCaptcha only reports a wrong one once someone solves the captcha, so try it after saving."}
+                Checked with Cloudflare when you save. It can't be shown again.
               </p>
             </div>
             <div className="grid gap-2">
@@ -249,7 +225,7 @@ export function CaptchasPage(props: {
     <>
       <PageHeader
         title="Captchas"
-        description="Cloudflare Turnstile or hCaptcha widgets that visitors solve before reaching a service. Attach one to any number of services."
+        description="Cloudflare Turnstile widgets that visitors solve before reaching a service. Attach one to any number of services."
       >
         <Button onClick={() => setEditing(null)}>
           <Plus /> Add captcha
@@ -271,8 +247,8 @@ export function CaptchasPage(props: {
             <div className="space-y-1">
               <p className="font-medium">No captchas yet</p>
               <p className="max-w-md text-sm text-muted-foreground">
-                Add the site key and secret key of a Turnstile or hCaptcha widget, then pick it for a service to keep
-                bots out.
+                Add the site key and secret key of a Cloudflare Turnstile widget, then pick it for a service to keep bots
+                out.
               </p>
             </div>
             <Button onClick={() => setEditing(null)} className="mt-2">
@@ -298,12 +274,7 @@ export function CaptchasPage(props: {
                         <BotOff className="size-4" />
                       </div>
                       <div className="min-w-0 leading-tight">
-                        <div className="flex items-center gap-2">
-                          <span className="truncate text-sm font-medium">{c.name}</span>
-                          <Badge variant="outline" className="font-normal text-muted-foreground">
-                            {PROVIDERS[c.provider].label}
-                          </Badge>
-                        </div>
+                        <p className="truncate text-sm font-medium">{c.name}</p>
                         <p className="max-w-64 truncate font-mono text-xs text-muted-foreground" title={c.siteKey}>
                           {c.siteKey}
                         </p>
