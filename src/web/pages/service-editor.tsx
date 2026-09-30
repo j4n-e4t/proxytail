@@ -13,7 +13,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DeviceBadge } from "@/components/device-badge";
 import { DevicePicker } from "@/components/device-picker";
-import { serviceState, StateTile } from "@/components/status";
+import { ServiceIcon, serviceState } from "@/components/status";
 import {
   api,
   type ClientAuth,
@@ -283,15 +283,28 @@ function ServiceForm(
               "Expose a service on your tailnet through Traefik."
             )}
           </DialogDescription>
-          {state && (
-            <div className="mt-2 flex items-center gap-3 rounded-lg border bg-muted/30 p-2.5">
-              <StateTile state={state} />
-              <div className="min-w-0 leading-tight">
-                <p className="text-sm font-medium">{state.label}</p>
-                <p className="text-xs whitespace-pre-line text-muted-foreground">{state.detail}</p>
+          <div className="mt-2 flex items-center gap-3 rounded-lg border bg-muted/30 p-2.5">
+            {existing && state ? (
+              <ServiceIcon host={existing} state={state} />
+            ) : (
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border bg-background">
+                <Globe className="size-4 text-muted-foreground" />
               </div>
+            )}
+            <div className="min-w-0 flex-1 leading-tight">
+              <p className="text-sm font-medium">{state?.label ?? "New service"}</p>
+              <p className="text-xs whitespace-pre-line text-muted-foreground">
+                {state?.detail ?? (enabled ? "Traefik routes it once it's created." : "Created without a route in Traefik.")}
+              </p>
             </div>
-          )}
+            {/* Disabled services are removed from Traefik but kept here. */}
+            <div className="flex shrink-0 items-center gap-2 pr-1">
+              <Label htmlFor="service-enabled" className="text-sm font-normal text-muted-foreground">
+                Enabled
+              </Label>
+              <Switch id="service-enabled" checked={enabled} onCheckedChange={setEnabled} />
+            </div>
+          </div>
           <TabsList className="mt-3 w-full">
             <TabsTrigger value="domains">Hostnames</TabsTrigger>
             <TabsTrigger value="target">Target</TabsTrigger>
@@ -587,11 +600,6 @@ function ServiceForm(
           </TabsContent>
 
           <TabsContent value="advanced" className="space-y-5">
-            <Section
-              title="Enabled"
-              description="Disabled services are removed from Traefik but kept here."
-              action={<Switch checked={enabled} onCheckedChange={setEnabled} aria-label="Enabled" />}
-            />
             <Section
               title="Skip upstream TLS verification"
               description="Connect to the target over https and accept its certificate even if it's self-signed or doesn't match."

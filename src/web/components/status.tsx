@@ -87,19 +87,6 @@ const text = {
   muted: "text-muted-foreground",
 };
 
-/** The service's icon tile, tinted and swapped to reflect its state. */
-export function StateTile({ state }: { state: ServiceState }) {
-  const Icon = state.icon;
-  return (
-    <div
-      className={cn("flex size-9 shrink-0 items-center justify-center rounded-lg border", tone[state.tone])}
-      aria-label={state.label}
-    >
-      <Icon className="size-4" />
-    </div>
-  );
-}
-
 const dot = {
   success: "bg-success",
   warning: "bg-warning",
