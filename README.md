@@ -65,7 +65,7 @@ Then, in the UI:
    shows each service's last 24 hours (requests per hour, 5xx rate, 95th percentile response time) and the days left
    on its certificate, turning orange below 21 days and red below 7: Traefik renews at 30.
 4. Optionally, **Client CAs:** require client certificates for a service. See [Client certificates (mTLS)](#client-certificates-mtls).
-5. Optionally, **Settings → Rate limiting:** limit how many requests each client IP can make. See
+5. Optionally, **Security → Rate limiting:** limit how many requests each client IP can make. See
    [Rate limiting](#rate-limiting).
 6. **Requests:** watch the traffic your services get, or pick **View requests** in a service's menu.
 
@@ -177,7 +177,7 @@ certificates back to root, which `main`'s Traefik runs as, and restores `.env`. 
 
 ## Rate limiting
 
-Rate limiting is off until you turn on **Limit requests** under **Settings → Rate limiting**. Then every service gets
+Rate limiting is off until you turn on **Limit requests** under **Security → Rate limiting**. Then every service gets
 Traefik's [rateLimit](https://doc.traefik.io/traefik/middlewares/http/ratelimit/) middleware as its first middleware,
 before basic auth, so it also slows down password guessing. Requests over the limit get `429 Too Many Requests` with a
 `Retry-After` header.

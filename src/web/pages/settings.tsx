@@ -23,13 +23,12 @@ import { usePoll } from "@/hooks/use-poll";
 import { api, type AccessLogStatus, type Device, type RateLimitView, type Settings, type TraefikStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { AccessLogCard } from "@/pages/access-log-settings";
-import { RateLimitCard } from "@/pages/rate-limit-settings";
 
-export type SettingsSection = "general" | "tailscale" | "traefik" | "rate-limiting" | "request-log";
+export type SettingsSection = "general" | "tailscale" | "traefik" | "request-log";
 
 type Tone = "success" | "warning" | "danger" | "muted";
 
-/** The state of one system proxytail drives, for its tile and its entry in the section list. */
+/** The state of one system proxytail drives, for its tile. */
 interface Health {
   tone: Tone;
   state: string;
@@ -428,18 +427,18 @@ function TraefikCard({ traefik, health }: { traefik: TraefikStatus | null; healt
 
 // --- Page ---
 
-const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<{ className?: string }>; hint: string }[] =
-  [
-    { id: "general", label: "General", icon: Globe, hint: "Public address" },
-    { id: "tailscale", label: "Tailscale", icon: TailscaleIcon, hint: "Peers and tag" },
-    { id: "traefik", label: "Traefik", icon: TraefikIcon, hint: "Routing" },
-    { id: "rate-limiting", label: "Rate limiting", icon: Gauge, hint: "Requests per client" },
-    { id: "request-log", label: "Request log", icon: Activity, hint: "Retention" },
-  ];
+const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  { id: "general", label: "General", icon: Globe },
+  { id: "tailscale", label: "Tailscale", icon: TailscaleIcon },
+  { id: "traefik", label: "Traefik", icon: TraefikIcon },
+  { id: "request-log", label: "Request log", icon: Activity },
+];
 
+/** The sidebar picks the section; the tiles above it show the state of everything proxytail drives. */
 export function SettingsPage(props: {
   section: SettingsSection;
   onSection: (s: SettingsSection) => void;
+  onOpenRateLimiting: () => void;
   settings: Settings;
   traefik: TraefikStatus | null;
   devices: Device[] | null;
@@ -455,73 +454,54 @@ export function SettingsPage(props: {
       : { tone: "warning", state: "No public address" },
     tailscale: tailscaleHealth(props.settings, props.devices, props.devicesError),
     traefik: traefikHealth(props.traefik),
-    "rate-limiting": rateLimitHealth(rateLimit.data),
     "request-log": requestLogHealth(accessLog.data),
   };
 
   const section = props.section;
   const current = SECTIONS.find((s) => s.id === section)!;
+  const tile = (id: SettingsSection) => {
+    const s = SECTIONS.find((x) => x.id === id)!;
+    return (
+      <StatusTile
+        icon={s.icon}
+        label={s.label}
+        health={health[id]}
+        active={section === id}
+        onClick={() => props.onSection(id)}
+      />
+    );
+  };
 
   return (
     <>
       <PageHeader title="Settings" description="The systems proxytail drives, and how it handles your traffic." />
 
-      {/* Health of everything proxytail depends on; each tile opens its section. */}
       <div className="mb-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {SECTIONS.filter((s) => s.id !== "general").map((s) => (
-          <StatusTile
-            key={s.id}
-            icon={s.icon}
-            label={s.label}
-            health={health[s.id]}
-            active={section === s.id}
-            onClick={() => props.onSection(s.id)}
+        {tile("tailscale")}
+        {tile("traefik")}
+        <StatusTile
+          icon={Gauge}
+          label="Rate limiting"
+          health={rateLimitHealth(rateLimit.data)}
+          active={false}
+          onClick={props.onOpenRateLimiting}
+        />
+        {tile("request-log")}
+      </div>
+
+      <section aria-label={current.label} className="grid max-w-4xl grid-cols-1 gap-6">
+        {section === "general" && <PublicAddressCard settings={props.settings} onSaved={props.onSaved} />}
+        {section === "tailscale" && (
+          <TailscaleCard
+            settings={props.settings}
+            health={health.tailscale}
+            devicesError={props.devicesError}
+            onSaved={props.onSaved}
           />
-        ))}
-      </div>
-
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[14rem_minmax(0,1fr)] lg:items-start">
-        <nav aria-label="Settings" className="flex gap-1 overflow-x-auto lg:sticky lg:top-8 lg:flex-col">
-          {SECTIONS.map((s) => {
-            const Icon = s.icon;
-            return (
-              <button
-                key={s.id}
-                onClick={() => props.onSection(s.id)}
-                aria-current={section === s.id ? "page" : undefined}
-                className={cn(
-                  "flex shrink-0 items-center gap-3 rounded-md px-3 py-2 text-left text-sm transition-colors",
-                  section === s.id
-                    ? "bg-muted font-medium text-foreground"
-                    : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-                )}
-              >
-                <Icon className="size-4 shrink-0" />
-                <span className="min-w-0 flex-1">
-                  <span className="block">{s.label}</span>
-                  <span className="hidden truncate text-xs font-normal text-muted-foreground lg:block">{s.hint}</span>
-                </span>
-                <Dot tone={health[s.id].tone} className="hidden lg:block" />
-              </button>
-            );
-          })}
-        </nav>
-
-        <section aria-label={current.label} className="grid min-w-0 max-w-4xl grid-cols-1 gap-6">
-          {section === "general" && <PublicAddressCard settings={props.settings} onSaved={props.onSaved} />}
-          {section === "tailscale" && (
-            <TailscaleCard
-              settings={props.settings}
-              health={health.tailscale}
-              devicesError={props.devicesError}
-              onSaved={props.onSaved}
-            />
-          )}
-          {section === "traefik" && <TraefikCard traefik={props.traefik} health={health.traefik} />}
-          {section === "rate-limiting" && <RateLimitCard onChanged={rateLimit.setData} />}
-          {section === "request-log" && <AccessLogCard onChanged={accessLog.setData} />}
-        </section>
-      </div>
+        )}
+        {section === "traefik" && <TraefikCard traefik={props.traefik} health={health.traefik} />}
+        {section === "request-log" && <AccessLogCard onChanged={accessLog.setData} />}
+      </section>
     </>
   );
 }

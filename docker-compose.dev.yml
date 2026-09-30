@@ -88,8 +88,8 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
-  # Rate limit counters, when Valkey is chosen under Settings. Traefik reaches it as valkey:6379, the app on the host
-  # on loopback (VALKEY_ADDR, default localhost:6379).
+  # Rate limit counters, when Valkey is chosen under Security → Rate limiting. Traefik reaches it as valkey:6379, the
+  # app on the host on loopback (VALKEY_ADDR, default localhost:6379).
   valkey:
     image: valkey/valkey:${VALKEY_VERSION:-9.1}-alpine
     command: [valkey-server, --save, "", --appendonly, "no", --maxmemory, 32mb, --maxmemory-policy, allkeys-lru]

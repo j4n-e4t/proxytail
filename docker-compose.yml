@@ -159,7 +159,7 @@ services:
     pids_limit: 512
     logging: *logging
 
-  # Keeps the rate limit counters when Valkey is chosen under Settings → Rate limiting. Only reachable on the Docker
+  # Keeps the rate limit counters when Valkey is chosen under Security → Rate limiting. Only reachable on the Docker
   # network. The counters are short-lived, so nothing is written to disk, and memory is capped.
   valkey:
     image: valkey/valkey:${VALKEY_VERSION:-9.1}-alpine

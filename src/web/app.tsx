@@ -27,6 +27,7 @@ import { useTheme, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ClientCasPage } from "@/pages/client-cas";
 import { PeersPage } from "@/pages/peers";
+import { RateLimitingPage } from "@/pages/rate-limiting";
 import { RequestsPage } from "@/pages/requests";
 import { ServiceEditorDialog } from "@/pages/service-editor";
 import { DomainsPage } from "@/pages/domains";
@@ -34,8 +35,8 @@ import { HostsPage } from "@/pages/hosts";
 import { isSettingsSection, SettingsPage } from "@/pages/settings";
 import "./globals.css";
 
-type Page = "services" | "requests" | "domains" | "client-cas" | "peers" | "settings";
-const PAGES: Page[] = ["services", "requests", "domains", "client-cas", "peers", "settings"];
+type Page = "services" | "requests" | "domains" | "client-cas" | "peers" | "rate-limiting" | "settings";
+const PAGES: Page[] = ["services", "requests", "domains", "client-cas", "peers", "rate-limiting", "settings"];
 
 interface Route {
   page: Page;
@@ -222,7 +223,7 @@ function Console() {
       label: "Security",
       items: [
         { target: "client-cas", label: "Client CAs", icon: ShieldCheck, count: clientCas.data?.length },
-        { target: "settings/rate-limiting", label: "Rate limiting", icon: Gauge },
+        { target: "rate-limiting", label: "Rate limiting", icon: Gauge },
       ],
     },
     {
@@ -378,10 +379,12 @@ function Console() {
               onOpenSettings={() => setPage("settings")}
             />
           )}
+          {page === "rate-limiting" && <RateLimitingPage />}
           {page === "settings" && settings.data && (
             <SettingsPage
               section={isSettingsSection(route.sub) ? route.sub : "general"}
               onSection={(s) => navigate(s === "general" ? "settings" : `settings/${s}`)}
+              onOpenRateLimiting={() => setPage("rate-limiting")}
               settings={settings.data}
               traefik={traefik.data}
               devices={devices.data}
