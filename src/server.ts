@@ -625,7 +625,7 @@ const server = Bun.serve({
       DELETE: handle(() => {
         const used = hosts.list().filter((h) => h.captcha);
         if (used.length)
-          throw new HttpError(409, `${used.map((h) => h.domains[0]).join(", ")} ask for the captcha. Turn it off there first.`);
+          throw new HttpError(409, `Turn the captcha off for ${used.map((h) => h.domains[0]).join(", ")} first.`);
         saveCaptchaConfig(null);
         return json(captchaView());
       }),
