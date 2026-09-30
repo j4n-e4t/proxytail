@@ -231,8 +231,8 @@ let nextId = 1;
 
 function statsWorker() {
   if (worker) return worker;
-  // build.ts compiles the worker into the binary as accesslog-worker.js, next to this file; run from source, Bun
-  // resolves the .js name to accesslog-worker.ts. Asking for the .ts name only works from source.
+  // A path relative to this file, which build.ts also compiles into the binary. `.js`, not `.ts`: in the binary the
+  // worker is compiled to accesslog-worker.js, and from source Bun resolves the `.js` to the `.ts` file.
   const w = new Worker(new URL("./accesslog-worker.js", import.meta.url).href);
   w.onmessage = (e: MessageEvent<{ id: number; result?: unknown; error?: string }>) => {
     const p = pending.get(e.data.id);
