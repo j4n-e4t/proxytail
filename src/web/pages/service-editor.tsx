@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { ArrowRight, Globe, KeyRound, Loader2, Plus, ShieldCheck, X } from "lucide-react";
+import { ArrowRight, BotOff, Globe, KeyRound, Loader2, Plus, ShieldCheck, X } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -14,9 +14,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DeviceBadge } from "@/components/device-badge";
 import { DevicePicker } from "@/components/device-picker";
 import { ServiceIcon, serviceState } from "@/components/status";
+import { lifetimeLabel, PROVIDERS } from "@/pages/captchas";
 import {
   api,
   type BasicAuthUser,
+  type Captcha,
   type ClientAuth,
   type ClientCa,
   type Device,
@@ -33,10 +35,12 @@ interface EditorProps {
   domains: Domain[] | null;
   clientCas: ClientCa[] | null;
   basicAuthUsers: BasicAuthUser[] | null;
+  captchas: Captcha[] | null;
   traefik: TraefikStatus | null;
   onOpenDomains: () => void;
   onOpenClientCas: () => void;
   onOpenUsers: () => void;
+  onOpenCaptchas: () => void;
   onCancel: () => void;
   onSaved: () => void;
 }
@@ -49,6 +53,7 @@ export function ServiceEditorDialog(
     props.domains === null ||
     props.clientCas === null ||
     props.basicAuthUsers === null ||
+    props.captchas === null ||
     (props.hostId !== null && props.hosts === null);
   const existing = props.hostId !== null ? props.hosts?.find((h) => h.id === props.hostId) : undefined;
   return (
@@ -74,6 +79,7 @@ export function ServiceEditorDialog(
             domains={props.domains!}
             clientCas={props.clientCas!}
             basicAuthUsers={props.basicAuthUsers!}
+            captchas={props.captchas!}
             existing={existing ?? null}
           />
         )}
@@ -130,6 +136,7 @@ function ServiceForm(
     domains: Domain[];
     clientCas: ClientCa[];
     basicAuthUsers: BasicAuthUser[];
+    captchas: Captcha[];
     existing: ProxyHost | null;
     initialDeviceId?: string;
   },
@@ -163,6 +170,8 @@ function ServiceForm(
   );
   const [certHeaders, setCertHeaders] = useState(existing?.clientCertHeaders ?? false);
   const [noIndex, setNoIndex] = useState(existing?.noIndex ?? false);
+  const [captchaOn, setCaptchaOn] = useState(existing?.captchaId != null);
+  const [captchaId, setCaptchaId] = useState<number | null>(existing?.captchaId ?? null);
   const [tab, setTab] = useState<Tab>("domains");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -182,6 +191,12 @@ function ServiceForm(
     if (on && !userIds.length && props.basicAuthUsers.length === 1) setUserIds([props.basicAuthUsers[0]!.id]);
   };
 
+  const toggleCaptcha = (on: boolean) => {
+    setCaptchaOn(on);
+    // Preselect the only captcha, the common case.
+    if (on && captchaId === null && props.captchas.length === 1) setCaptchaId(props.captchas[0]!.id);
+  };
+
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -193,6 +208,7 @@ function ServiceForm(
     if (rows.some((r) => !r.base)) return invalid("domains", "Pick a domain for the hostname and every alias.");
     if (!deviceId) return invalid("target", "Pick the tailnet peer that runs this service.");
     if (!port) return invalid("target", "Enter the port your service is listening on.");
+    if (captchaOn && captchaId === null) return invalid("auth", "Pick the captcha visitors have to solve.");
     if (basicAuth && !userIds.length) return invalid("auth", "Pick at least one user who can sign in.");
     if (clientAuth !== "off" && !caIds.length)
       return invalid("auth", "Pick a CA to verify client certificates against.");
@@ -210,6 +226,7 @@ function ServiceForm(
       clientCaIds: clientAuth === "off" ? [] : caIds,
       clientCertHeaders: clientAuth !== "off" && certHeaders,
       noIndex,
+      captchaId: captchaOn ? captchaId : null,
     };
     setSaving(true);
     try {
@@ -307,7 +324,7 @@ function ServiceForm(
             <TabsTrigger value="target">Target</TabsTrigger>
             <TabsTrigger value="auth">
               Authentication
-              {(basicAuth || clientAuth !== "off") && <span className="size-1.5 rounded-full bg-primary" aria-label="on" />}
+              {(captchaOn || basicAuth || clientAuth !== "off") && <span className="size-1.5 rounded-full bg-primary" aria-label="on" />}
             </TabsTrigger>
             <TabsTrigger value="advanced">
               Advanced
@@ -448,6 +465,46 @@ function ServiceForm(
           </TabsContent>
 
           <TabsContent value="auth" className="space-y-5">
+            <Section
+              title="Captcha"
+              description="Visitors solve a Turnstile or hCaptcha challenge before reaching the service, and aren't asked again for a while."
+              action={<Switch checked={captchaOn} onCheckedChange={toggleCaptcha} aria-label="Require a captcha" />}
+            >
+              {captchaOn &&
+                (props.captchas.length === 0 ? (
+                  <div className="flex items-center justify-between gap-4 rounded-lg border border-dashed p-4">
+                    <p className="text-sm text-muted-foreground">You haven't added a captcha yet.</p>
+                    <Button type="button" variant="outline" size="sm" onClick={props.onOpenCaptchas}>
+                      <BotOff /> Manage captchas
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <Select value={captchaId === null ? "" : String(captchaId)} onValueChange={(v) => setCaptchaId(Number(v))}>
+                      <SelectTrigger className="w-full" aria-label="Captcha">
+                        <SelectValue placeholder="Pick a captcha" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {props.captchas.map((c) => (
+                          <SelectItem key={c.id} value={String(c.id)}>
+                            {c.name}
+                            <span className="text-xs text-muted-foreground">
+                              {PROVIDERS[c.provider].label}, remembers visitors for {lifetimeLabel(c.lifetime)}
+                            </span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      Allow <span className="font-mono">{firstDomain}</span> and its parallel aliases in the widget's
+                      hostnames at your provider. Scripts and API clients without a browser can't get through.{" "}
+                      <button type="button" className="underline" onClick={props.onOpenCaptchas}>
+                        Manage captchas
+                      </button>
+                    </p>
+                  </div>
+                ))}
+            </Section>
 
             <Section
               title="Basic auth"

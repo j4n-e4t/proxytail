@@ -32,6 +32,8 @@ export interface ProxyHost {
   clientCertHeaders: boolean;
   /** Sends `X-Robots-Tag: noindex, nofollow`. */
   noIndex: boolean;
+  /** The captcha visitors solve before reaching the service, or null. */
+  captchaId: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -51,6 +53,7 @@ export type ProxyHostDraft = Pick<
   | "clientCaIds"
   | "clientCertHeaders"
   | "noIndex"
+  | "captchaId"
 >;
 
 export interface BasicAuthUser {
@@ -60,6 +63,30 @@ export interface BasicAuthUser {
   updatedAt: string;
   /** Services the user can sign in to. */
   hostIds: number[];
+}
+
+export type CaptchaProvider = "turnstile" | "hcaptcha";
+
+export interface Captcha {
+  id: number;
+  name: string;
+  provider: CaptchaProvider;
+  siteKey: string;
+  /** Seconds a visitor who solved it is let through before being asked again. */
+  lifetime: number;
+  createdAt: string;
+  updatedAt: string;
+  /** Services that ask for this captcha. */
+  hostIds: number[];
+}
+
+/** A new captcha, or changes to one. An empty secret key keeps the current one. */
+export interface CaptchaDraft {
+  name: string;
+  provider: CaptchaProvider;
+  siteKey: string;
+  secretKey?: string;
+  lifetime: number;
 }
 
 export interface CertSummary {
@@ -293,6 +320,10 @@ export const api = {
   updateBasicAuthUser: (id: number, patch: { username?: string; password?: string }) =>
     request<BasicAuthUser>("PATCH", `/api/basic-auth-users/${id}`, patch),
   deleteBasicAuthUser: (id: number) => request<void>("DELETE", `/api/basic-auth-users/${id}`),
+  captchas: () => request<Captcha[]>("GET", "/api/captchas"),
+  createCaptcha: (c: CaptchaDraft) => request<Captcha>("POST", "/api/captchas", c),
+  updateCaptcha: (id: number, c: Partial<CaptchaDraft>) => request<Captcha>("PATCH", `/api/captchas/${id}`, c),
+  deleteCaptcha: (id: number) => request<void>("DELETE", `/api/captchas/${id}`),
   detectIp: () => request<{ ip: string }>("POST", "/api/settings/detect-ip"),
   settings: () => request<Settings>("GET", "/api/settings"),
   saveSettings: (s: Record<string, string | null>) => request<Settings>("PUT", "/api/settings", s),

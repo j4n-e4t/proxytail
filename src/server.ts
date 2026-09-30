@@ -12,14 +12,18 @@ import {
   type Filters,
   type Range,
 } from "./accesslog";
+import { captchaCheck, checkSecretKey, LIFETIME, PROVIDERS } from "./captcha";
 import {
   basicAuthUsers,
+  captchas,
   clientCas,
   domains as domainStore,
   hosts,
   settings,
   type Alias,
   type BasicAuthUser,
+  type Captcha,
+  type CaptchaInput,
   type ClientAuth,
   type ClientCa,
   type ProxyHost,
@@ -46,7 +50,7 @@ import {
   tailscaleVersion,
   TailscaleError,
 } from "./tailscale";
-import { buildConfig, rateLimitStatus, traefikStatus } from "./traefik";
+import { appUrlForTraefik, buildConfig, rateLimitStatus, traefikStatus } from "./traefik";
 
 class HttpError extends Error {
   constructor(
@@ -183,6 +187,10 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
     for (const id of clientCaIds) if (!clientCas.get(id)) throw new HttpError(400, `Client CA ${id} does not exist`);
   }
 
+  // Existence is checked again atomically when the service is written (see saveHost).
+  const captchaId = raw.captchaId == null ? null : Number(raw.captchaId);
+  if (captchaId !== null && !captchas.get(captchaId)) throw new HttpError(400, `Captcha ${raw.captchaId} does not exist`);
+
   return {
     domains,
     aliases,
@@ -199,6 +207,7 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
     clientCaIds,
     clientCertHeaders: clientAuth !== "off" && !!raw.clientCertHeaders,
     noIndex: !!raw.noIndex,
+    captchaId,
   };
 }
 
@@ -257,13 +266,16 @@ function domainView(d: ReturnType<typeof domainStore.list>[number]) {
 const isForeignKeyError = (e: unknown) =>
   e instanceof SQLiteError && !!e.code?.startsWith("SQLITE_CONSTRAINT") && e.message.includes("FOREIGN KEY");
 
-/** Writes a service. A CA or user deleted since validation fails the write instead of being dropped from the service. */
+/**
+ * Writes a service. A CA, user or captcha deleted since validation fails the write instead of being dropped from the
+ * service.
+ */
 function saveHost<T>(write: () => T): T {
   try {
     return write();
   } catch (e) {
     if (isForeignKeyError(e))
-      throw new HttpError(409, "One of the selected client CAs or users no longer exists. Reload and try again.");
+      throw new HttpError(409, "One of the selected client CAs, users or captchas no longer exists. Reload and try again.");
     throw e;
   }
 }
@@ -276,6 +288,50 @@ function getCa(raw: string) {
   const ca = clientCas.get(parseId(raw));
   if (!ca) throw new HttpError(404, "CA not found");
   return ca;
+}
+
+/** Captchas as returned by the API, with the services that ask for them. Secret keys never leave the server. */
+function captchaView(c: Captcha, all = hosts.list()) {
+  const { secretKey: _, ...rest } = c;
+  return { ...rest, hostIds: all.filter((h) => h.captchaId === c.id).map((h) => h.id) };
+}
+
+function getCaptcha(raw: string) {
+  const c = captchas.get(parseId(raw));
+  if (!c) throw new HttpError(404, "Captcha not found");
+  return c;
+}
+
+/** Site keys go into the challenge page; both providers' keys are letters, digits, dashes and underscores. */
+const SITE_KEY_RE = /^[\w-]{1,128}$/;
+const SECRET_KEY_RE = /^[\x21-\x7e]{1,256}$/;
+
+/** A new captcha (`existing` undefined), or changes to one. An empty secret key keeps the current one. */
+async function validateCaptcha(raw: Record<string, unknown>, existing?: Captcha): Promise<CaptchaInput> {
+  const name = validateName(raw.name ?? existing?.name, "Name");
+  const provider = raw.provider ?? existing?.provider;
+  if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider))
+    throw new HttpError(400, `Provider must be one of ${Object.keys(PROVIDERS).join(", ")}`);
+  const siteKey = String(raw.siteKey ?? existing?.siteKey ?? "").trim();
+  if (!SITE_KEY_RE.test(siteKey)) throw new HttpError(400, "Enter the site key from your provider's dashboard");
+  const newSecret = typeof raw.secretKey === "string" ? raw.secretKey.trim() : "";
+  // A secret key belongs to its provider: switching providers takes a new one.
+  if (!newSecret && (!existing || existing.provider !== provider))
+    throw new HttpError(400, "Enter the secret key from your provider's dashboard");
+  const secretKey = newSecret || existing!.secretKey;
+  if (!SECRET_KEY_RE.test(secretKey)) throw new HttpError(400, "The secret key can't contain spaces");
+  const lifetime = Number(raw.lifetime ?? existing?.lifetime ?? LIFETIME.default);
+  if (!Number.isInteger(lifetime) || lifetime < LIFETIME.min || lifetime > LIFETIME.max)
+    throw new HttpError(400, "Visitors must be remembered for 5 minutes to 30 days");
+  const input: CaptchaInput = { name, provider: provider as CaptchaInput["provider"], siteKey, secretKey, lifetime };
+  // Only ask the provider when the keys change, so renaming works while it's unreachable.
+  const keysChanged =
+    !existing || existing.provider !== input.provider || existing.siteKey !== siteKey || existing.secretKey !== secretKey;
+  if (keysChanged) {
+    const rejected = await checkSecretKey(input);
+    if (rejected) throw new HttpError(400, rejected);
+  }
+  return input;
 }
 
 function validateName(raw: unknown, what: string) {
@@ -567,6 +623,37 @@ const server = Bun.serve({
       }),
     },
 
+    "/api/captchas": {
+      GET: handle(() => {
+        const all = hosts.list();
+        return json(captchas.list().map((c) => captchaView(c, all)));
+      }),
+      POST: handle(async (req) => json(captchaView(captchas.create(await validateCaptcha(await body(req)))), 201)),
+    },
+    "/api/captchas/:id": {
+      // Any of the fields; an empty or missing secret key keeps the current one.
+      PATCH: handle(async (req) => {
+        const c = getCaptcha(req.params.id);
+        return json(captchaView(captchas.update(c.id, await validateCaptcha(await body(req), c))!));
+      }),
+      DELETE: handle((req) => {
+        const c = getCaptcha(req.params.id);
+        const inUse = () => {
+          const used = hosts.list().filter((h) => h.captchaId === c.id);
+          return new HttpError(409, `${c.name} is used by ${used.map((h) => h.domains[0]).join(", ") || "a service"}. Remove it from those services first.`);
+        };
+        if (hosts.list().some((h) => h.captchaId === c.id)) throw inUse();
+        try {
+          captchas.delete(c.id);
+        } catch (e) {
+          // A service started using it since the check above.
+          if (isForeignKeyError(e)) throw inUse();
+          throw e;
+        }
+        return new Response(null, { status: 204 });
+      }),
+    },
+
     "/api/devices": {
       GET: handle(async (req) => json(await listDevices(new URL(req.url).searchParams.has("refresh")))),
     },
@@ -633,7 +720,18 @@ const server = Bun.serve({
     "/api/health": { GET: () => json({ ok: true }) },
 
     // Polled by Traefik's HTTP provider over the Docker network.
-    "/api/traefik/config": { GET: handle(() => json(buildConfig())) },
+    "/api/traefik/config": { GET: handle((req) => json(buildConfig(appUrlForTraefik(req.url)))) },
+    // Traefik's forwardAuth call for every request to a service with a captcha, over the Docker network. It carries
+    // the visitor's request (see captcha.ts), so it's not an API call from the UI and skips the browser checks.
+    "/api/captcha/check/:hostId": async (req) => {
+      try {
+        return await captchaCheck(req, parseId(req.params.hostId));
+      } catch (e) {
+        if (e instanceof HttpError) return new Response(`${e.message}\n`, { status: e.status });
+        console.error(e);
+        return new Response("Internal server error\n", { status: 500 });
+      }
+    },
     "/api/traefik/status": { GET: handle(async () => json(await traefikStatus())) },
   },
   development: process.env.NODE_ENV !== "production" && { hmr: true, console: true },

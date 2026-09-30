@@ -34,6 +34,8 @@ services:
       TS_BACKEND_TAG: ${TS_BACKEND_TAG:-}
       PUBLIC_ADDRESS: ${PUBLIC_ADDRESS:-}
       UI_HOSTS: ${UI_HOSTS:-}
+      # Where Traefik reaches proxytail for captchas. Empty: the address Traefik polls its configuration from.
+      APP_URL_FOR_TRAEFIK: ${APP_URL_FOR_TRAEFIK:-}
     ports:
       - "127.0.0.1:${UI_PORT:-3000}:3000"
     volumes:

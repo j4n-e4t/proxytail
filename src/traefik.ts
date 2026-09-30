@@ -1,5 +1,5 @@
 import { certificateFor, type CertInfo } from "./certs";
-import { basicAuthUsers, clientCas, hosts, type ProxyHost } from "./db";
+import { basicAuthUsers, captchas, clientCas, hosts, type ProxyHost } from "./db";
 import { rateLimitMiddleware } from "./ratelimit";
 
 // Every service is served over HTTPS with a Let's Encrypt certificate; plain HTTP is redirected by Traefik.
@@ -41,8 +41,16 @@ function minTlsVersion() {
  */
 export const TLS_DEFAULTS = { sniStrict: true, minVersion: minTlsVersion() };
 
-/** Dynamic configuration served to Traefik's HTTP provider. */
-export function buildConfig() {
+/**
+ * How Traefik reaches proxytail, for the captchas' forwardAuth calls: APP_URL_FOR_TRAEFIK, or else the address Traefik
+ * polls the configuration from (http://app:3000 in docker-compose.yml).
+ */
+export function appUrlForTraefik(configRequestUrl: string) {
+  return (process.env.APP_URL_FOR_TRAEFIK?.trim() || new URL(configRequestUrl).origin).replace(/\/+$/, "");
+}
+
+/** Dynamic configuration served to Traefik's HTTP provider. `appUrl` is where Traefik reaches proxytail. */
+export function buildConfig(appUrl: string) {
   const routers: Record<string, unknown> = {};
   const services: Record<string, unknown> = {};
   const serversTransports: Record<string, unknown> = {};
@@ -50,6 +58,7 @@ export function buildConfig() {
   const tlsOptions: Record<string, unknown> = {};
   const cas = new Map(clientCas.list().map((ca) => [ca.id, ca]));
   const users = new Map(basicAuthUsers.list().map((u) => [u.id, u]));
+  const captchaIds = new Set(captchas.list().map((c) => c.id));
   const rateLimit = rateLimitMiddleware();
 
   for (const h of hosts.list()) {
@@ -93,6 +102,23 @@ export function buildConfig() {
         };
         chain.push(`${name}-client-cert-strip`, `${name}-client-cert`);
       }
+    }
+    // Fail closed as well: a service that asks for a captcha is never published without it.
+    if (h.captchaId !== null && !captchaIds.has(h.captchaId)) {
+      console.error(`Not routing ${h.domains[0]}: its captcha doesn't exist`);
+      continue;
+    }
+    // Before basic auth, so bots don't get to guess passwords. proxytail answers with the challenge page, or lets the
+    // request through when it carries a clearance cookie (see captcha.ts).
+    if (h.captchaId !== null) {
+      middlewares[`${name}-captcha`] = {
+        forwardAuth: {
+          address: `${appUrl}/api/captcha/check/${h.id}`,
+          // Only what the check needs: never the service's own credentials, e.g. basic auth's Authorization header.
+          authRequestHeaders: ["Accept", "Cookie"],
+        },
+      };
+      chain.push(`${name}-captcha`);
     }
     const authUsers = h.basicAuth ? h.basicAuthUserIds.map((id) => users.get(id)).filter((u) => !!u) : [];
     // Fail closed here too: basic auth without anyone to let in never publishes the service without the password check.

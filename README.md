@@ -64,8 +64,9 @@ Then, in the UI:
    route goes live within about 5 seconds. The list
    shows each service's last 24 hours (requests per hour, 5xx rate, 95th percentile response time) and the days left
    on its certificate, turning orange below 21 days and red below 7: Traefik renews at 30.
-4. Optionally, **Security → Basic auth users** or **Client CAs:** ask for a password or a client certificate before a
-   service. See [Basic auth](#basic-auth) and [Client certificates (mTLS)](#client-certificates-mtls).
+4. Optionally, **Security → Basic auth users**, **Client CAs** or **Captchas:** ask for a password, a client
+   certificate or a solved captcha before a service. See [Basic auth](#basic-auth),
+   [Client certificates (mTLS)](#client-certificates-mtls) and [Captchas](#captchas).
 5. Optionally, **Security → Rate limiting:** limit how many requests each client IP can make. See
    [Rate limiting](#rate-limiting).
 6. **Requests:** watch the traffic your services get, or pick **View requests** in a service's menu.
@@ -136,6 +137,51 @@ certificates.
   doesn't route the service at all rather than serving it without the check, and the UI shows it as **Not routed**.
 - A client can't get around the check by sending a different SNI name than the `Host` header, e.g. the name of a
   service without client certificates: Traefik answers `421 Misdirected Request` when their TLS options differ.
+
+## Captchas
+
+A service can ask visitors to solve a [Cloudflare Turnstile](https://www.cloudflare.com/application-services/products/turnstile/)
+or [hCaptcha](https://www.hcaptcha.com/) challenge before any request reaches it, which keeps out bots and scanners.
+Captchas are managed on their own page and attached to services, like basic auth users:
+
+1. At your provider, create a widget (Turnstile) or site (hCaptcha) and allow the hostnames of the services you'll
+   attach it to, including parallel aliases.
+2. **Security → Captchas:** add its site key and secret key, and how long visitors are remembered (30 minutes to
+   30 days, 1 day by default). proxytail checks a Turnstile secret key with Cloudflare when you save it. hCaptcha
+   only reports a wrong secret key once someone solves the captcha, so try the service afterwards.
+3. **Services:** turn on **Captcha** in the Authentication tab and pick one.
+
+A visitor without a clearance gets a challenge page (`403`) in place of what they asked for. Once they solve it, the
+page sends the token to `/.well-known/proxytail-captcha/verify` on the service's own hostname; proxytail checks it
+with the provider, sets a cookie and sends the visitor back where they were. Requests that aren't a browser loading a
+page, e.g. API clients, scripts and images, get a plain `403` without a clearance, so a captcha suits services people
+open in a browser.
+
+How it works:
+
+- Each service with a captcha gets a [forwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/)
+  middleware, after rate limiting and before basic auth, so bots don't get to guess passwords. Traefik asks proxytail
+  about every request to the service, over the Docker network, and passes it on only if proxytail answers `200`. It
+  sends proxytail the hostname, path, method and client IP, and only the `Accept` and `Cookie` headers: never the
+  service's own credentials.
+- Traefik reaches proxytail at the address it polls its configuration from (`http://app:3000` in
+  `docker-compose.yml`). Set `APP_URL_FOR_TRAEFIK` if it should use another one.
+- The clearance is the `__Host-proxytail-captcha` cookie: `HttpOnly`, `Secure` and `SameSite=Lax`, for the one
+  hostname that set it. It's signed with a key proxytail generates on first use and keeps in its database, and is
+  only valid for that service and captcha until it expires. Shortening a captcha's lifetime applies to cookies issued
+  before, too; switching a service to another captcha asks everyone again. The service receives the cookie with the
+  rest of the `Cookie` header.
+- Tokens are single-use and checked with the provider together with the client IP. A token solved on another
+  hostname is rejected, except with the providers' test keys, which report a fixed hostname.
+- The challenge page loads the provider's script and nothing else, under a strict Content Security Policy, and sends
+  the provider its origin but not the path or query string the visitor asked for.
+- A captcha still used by a service can't be deleted, and a service can't be saved with a captcha that no longer
+  exists. Should a service ever end up with a captcha that's gone, proxytail doesn't route it, as with CAs and users.
+- Services with a captcha need proxytail to be up: while Traefik can't reach it, they answer `500`. Services without
+  one are unaffected.
+- To try it out, use the providers' test keys: Turnstile's site key `1x00000000000000000000AA` with the secret key
+  `1x0000000000000000000000000000000AA`, or hCaptcha's site key `10000000-ffff-ffff-ffff-000000000001` with the secret
+  key `0x0000000000000000000000000000000000000000`. They pass every visitor, so switch to real keys afterwards.
 
 ## Hiding from search engines
 
@@ -259,8 +305,8 @@ at the network layer. That's a deliberate trade-off for personal and homelab set
   answers to IPs, single-label names, `*.ts.net` and `*.internal` names; add other hostnames to `UI_HOSTS`. The UI is
   also served with `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, so it can't be
   framed and clickjacked.
-- **Traefik is internet-facing and can reach the UI** over the Docker network (it polls its config there). If Traefik
-  is compromised, so is proxytail. On a dedicated proxy host that adds little: whoever controls Traefik can already
+- **Traefik is internet-facing and can reach the UI** over the Docker network (it polls its config there, and asks
+  proxytail about requests to services with a [captcha](#captchas)). If Traefik is compromised, so is proxytail. On a dedicated proxy host that adds little: whoever controls Traefik can already
   reroute every service and reach everything the host can.
 - **The tailnet policy limits what the host reaches**, and with it Traefik. Tag the proxy host and grant it only the
   backend ports you proxy:
@@ -285,7 +331,8 @@ at the network layer. That's a deliberate trade-off for personal and homelab set
   request. It stays in proxytail's database for the retention you set, and anyone who can open the UI can read it.
 
 Traefik can reach the internet (it needs to for Let's Encrypt), and it holds the certificates and basic auth hashes it
-serves. Client CAs are stored as certificates only, without keys, so neither proxytail nor Traefik can mint client
+serves. Captcha secret keys and the key clearance cookies are signed with stay in proxytail's database, and aren't
+shown in the UI. Client CAs are stored as certificates only, without keys, so neither proxytail nor Traefik can mint client
 certificates.
 
 ## Development

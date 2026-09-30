@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
+  BotOff,
   ChevronDown,
   Gauge,
   Globe,
@@ -27,6 +28,7 @@ import { api } from "@/lib/api";
 import { useTheme, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { BasicAuthUsersPage } from "@/pages/basic-auth-users";
+import { CaptchasPage } from "@/pages/captchas";
 import { ClientCasPage } from "@/pages/client-cas";
 import { PeersPage } from "@/pages/peers";
 import { RateLimitingPage } from "@/pages/rate-limiting";
@@ -37,8 +39,27 @@ import { HostsPage } from "@/pages/hosts";
 import { isSettingsSection, SettingsPage } from "@/pages/settings";
 import "./globals.css";
 
-type Page = "services" | "requests" | "domains" | "client-cas" | "users" | "peers" | "rate-limiting" | "settings";
-const PAGES: Page[] = ["services", "requests", "domains", "client-cas", "users", "peers", "rate-limiting", "settings"];
+type Page =
+  | "services"
+  | "requests"
+  | "domains"
+  | "client-cas"
+  | "users"
+  | "captchas"
+  | "peers"
+  | "rate-limiting"
+  | "settings";
+const PAGES: Page[] = [
+  "services",
+  "requests",
+  "domains",
+  "client-cas",
+  "users",
+  "captchas",
+  "peers",
+  "rate-limiting",
+  "settings",
+];
 
 interface Route {
   page: Page;
@@ -205,6 +226,7 @@ function Console() {
   const domains = usePoll(api.domains, 0);
   const clientCas = usePoll(api.clientCas, 0);
   const users = usePoll(api.basicAuthUsers, 0);
+  const captchas = usePoll(api.captchas, 0);
   const traefik = usePoll(api.traefik, 5000);
   const devices = usePoll(
     useCallback(() => api.devices(), []),
@@ -227,6 +249,7 @@ function Console() {
       items: [
         { target: "users", label: "Basic auth users", icon: KeyRound, count: users.data?.length },
         { target: "client-cas", label: "Client CAs", icon: ShieldCheck, count: clientCas.data?.length },
+        { target: "captchas", label: "Captchas", icon: BotOff, count: captchas.data?.length },
         { target: "rate-limiting", label: "Rate limiting", icon: Gauge },
       ],
     },
@@ -276,6 +299,7 @@ function Console() {
     domains.reload();
     clientCas.reload();
     users.reload();
+    captchas.reload();
     traefik.reload();
   };
 
@@ -383,6 +407,17 @@ function Console() {
               onOpenService={(id) => navigate(`services/${id}`)}
             />
           )}
+          {page === "captchas" && (
+            <CaptchasPage
+              captchas={captchas.data}
+              hosts={hosts.data ?? []}
+              onChanged={() => {
+                captchas.reload();
+                hosts.reload();
+              }}
+              onOpenService={(id) => navigate(`services/${id}`)}
+            />
+          )}
           {page === "peers" && (
             <PeersPage
               devices={devices.data}
@@ -425,10 +460,12 @@ function Console() {
         domains={domains.data}
         clientCas={clientCas.data}
         basicAuthUsers={users.data}
+        captchas={captchas.data}
         traefik={traefik.data}
         onOpenDomains={() => setPage("domains")}
         onOpenClientCas={() => setPage("client-cas")}
         onOpenUsers={() => setPage("users")}
+        onOpenCaptchas={() => setPage("captchas")}
         onCancel={() => setPage("services")}
         onSaved={() => {
           refreshHosts();
