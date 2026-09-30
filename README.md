@@ -60,7 +60,9 @@ Then, in the UI:
    public IP.
 2. **Domains:** add a domain and create the wildcard record it shows, e.g. `*.example.com A 203.0.113.10`. The domain is
    verified against public DNS resolvers.
-3. **Services:** pick a subdomain, a tailnet peer, and a port. The route goes live within about 5 seconds.
+3. **Services:** pick a subdomain, a tailnet peer, and a port. The route goes live within about 5 seconds. The list
+   shows each service's last 24 hours (requests per hour, 5xx rate, 95th percentile response time) and the days left
+   on its certificate, turning orange below 21 days and red below 7: Traefik renews at 30.
 4. Optionally, **Client CAs:** require client certificates for a service. See [Client certificates (mTLS)](#client-certificates-mtls).
 5. Optionally, **Settings → Rate limiting:** limit how many requests each client IP can make. See
    [Rate limiting](#rate-limiting).
@@ -95,6 +97,23 @@ certificates.
   doesn't route the service at all rather than serving it without the check, and the UI shows it as **Not routed**.
 - A client can't get around the check by sending a different SNI name than the `Host` header, e.g. the name of a
   service without client certificates: Traefik answers `421 Misdirected Request` when their TLS options differ.
+
+## Headers
+
+Under **Advanced** in a service's editor:
+
+- **Hide from search engines** sends `X-Robots-Tag: noindex, nofollow`, so well-behaved crawlers don't list the
+  service. It doesn't keep anyone out.
+- **Framing** sets `X-Frame-Options` to `SAMEORIGIN` or `DENY`, overriding what the service sends, so other sites
+  can't show it in a frame for clickjacking. A service that allows framing in its own `Content-Security-Policy`
+  (`frame-ancestors`) still does in current browsers.
+- **Request headers** are set on every request to the service, e.g. a token the backend expects. An empty value
+  removes a header the client sent. Connection headers and those Traefik manages (`Host`, `X-Forwarded-*`,
+  `X-Real-Ip`, the client certificate header) can't be set. Values show up in Traefik's configuration.
+
+Response headers come first in the service's middleware chain, so they're also on responses Traefik answers itself
+(`401`, `429`). Request headers come after basic auth, so a configured `Authorization` header can't stand in for the
+password.
 
 ## Hardening
 

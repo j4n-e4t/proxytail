@@ -6,6 +6,7 @@ export interface CertInfo {
   state: CertState;
   issuer?: string;
   subject?: string;
+  validFrom?: string;
   validTo?: string;
   error?: string;
   checkedAt: string;
@@ -45,7 +46,8 @@ export function probeCertificate(servername: string): Promise<CertInfo> {
       const first = (v?: string | string[]) => (Array.isArray(v) ? v[0] : v);
       const subject = first(cert.subject?.CN);
       const issuer = [first(cert.issuer?.O), first(cert.issuer?.CN)].filter(Boolean).join(" · ") || undefined;
-      const base = { issuer, subject, validTo: cert.valid_to ? new Date(cert.valid_to).toISOString() : undefined };
+      const date = (v?: string) => (v ? new Date(v).toISOString() : undefined);
+      const base = { issuer, subject, validFrom: date(cert.valid_from), validTo: date(cert.valid_to) };
       if (!cert.subject || subject === "TRAEFIK DEFAULT CERT") return done({ ...base, state: "pending" });
       if (socket.authorized) return done({ ...base, state: "valid" });
       done({ ...base, state: "untrusted", error: String(socket.authorizationError ?? "not trusted") });

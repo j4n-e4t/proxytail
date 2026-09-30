@@ -34,6 +34,9 @@ if (!hostColumns.includes("basic_auth")) {
   db.run("ALTER TABLE proxy_hosts ADD COLUMN basic_auth INTEGER NOT NULL DEFAULT 0");
   db.run("ALTER TABLE proxy_hosts ADD COLUMN basic_auth_users TEXT NOT NULL DEFAULT '[]'");
 }
+if (!hostColumns.includes("headers")) {
+  db.run("ALTER TABLE proxy_hosts ADD COLUMN headers TEXT NOT NULL DEFAULT '{}'");
+}
 // Backend health checks were removed.
 if (hostColumns.includes("health_check")) {
   db.run("ALTER TABLE proxy_hosts DROP COLUMN health_check");
@@ -93,6 +96,20 @@ export type Scheme = "http" | "https";
  */
 export type ClientAuth = "off" | "require" | "optional";
 
+/** Whether browsers may show a service inside a frame on another page: left to the service, same origin, or never. */
+export type Framing = "service" | "sameorigin" | "deny";
+
+/** Headers proxytail adds for a service, under Advanced in its editor. */
+export interface HostHeaders {
+  /** `X-Robots-Tag: noindex, nofollow` on every response, so search engines don't index the service. */
+  noIndex: boolean;
+  framing: Framing;
+  /** Set on every request to the service. An empty value removes the header instead. */
+  requestHeaders: { name: string; value: string }[];
+}
+
+export const NO_HEADERS: HostHeaders = { noIndex: false, framing: "service", requestHeaders: [] };
+
 /** A basic auth credential; `hash` is an htpasswd-compatible bcrypt hash. */
 export interface BasicAuthUser {
   username: string;
@@ -115,6 +132,7 @@ export interface ProxyHost {
   clientCaIds: number[];
   /** Forward the verified client certificate's details to the service in X-Forwarded-Tls-Client-Cert-Info. */
   clientCertHeaders: boolean;
+  headers: HostHeaders;
   createdAt: string;
   updatedAt: string;
 }
@@ -135,6 +153,7 @@ interface ProxyHostRow {
   basic_auth_users: string;
   client_auth: ClientAuth;
   client_cert_headers: number;
+  headers: string;
   created_at: string;
   updated_at: string;
 }
@@ -168,6 +187,7 @@ function toHost(r: ProxyHostRow, links = caLinks(r.id)): ProxyHost {
     clientAuth: r.client_auth,
     clientCaIds: links.get(r.id) ?? [],
     clientCertHeaders: !!r.client_cert_headers,
+    headers: { ...NO_HEADERS, ...JSON.parse(r.headers) },
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -187,6 +207,7 @@ function toParams(h: ProxyHostInput) {
     basic_auth_users: JSON.stringify(h.basicAuthUsers),
     client_auth: h.clientAuth,
     client_cert_headers: h.clientCertHeaders ? 1 : 0,
+    headers: JSON.stringify(h.headers),
   };
 }
 
@@ -216,9 +237,9 @@ export const hosts = {
     const row = db
       .query<ProxyHostRow, any>(
         `INSERT INTO proxy_hosts (domains, device_id, device_name, target_ip, target_port, scheme, insecure_skip_verify, enabled,
-           basic_auth, basic_auth_users, client_auth, client_cert_headers)
+           basic_auth, basic_auth_users, client_auth, client_cert_headers, headers)
          VALUES ($domains, $device_id, $device_name, $target_ip, $target_port, $scheme, $insecure_skip_verify, $enabled,
-           $basic_auth, $basic_auth_users, $client_auth, $client_cert_headers)
+           $basic_auth, $basic_auth_users, $client_auth, $client_cert_headers, $headers)
          RETURNING *`,
       )
       .get(toParams(h))!;
@@ -232,7 +253,7 @@ export const hosts = {
            target_ip = $target_ip, target_port = $target_port, scheme = $scheme,
            insecure_skip_verify = $insecure_skip_verify, enabled = $enabled, basic_auth = $basic_auth,
            basic_auth_users = $basic_auth_users, client_auth = $client_auth, client_cert_headers = $client_cert_headers,
-           updated_at = datetime('now')
+           headers = $headers, updated_at = datetime('now')
          WHERE id = $id RETURNING *`,
       )
       .get({ ...toParams(h), id });

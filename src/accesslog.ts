@@ -1,6 +1,6 @@
 import { stat, truncate } from "node:fs/promises";
 import { join } from "node:path";
-import { listEntries, RANGES, stats, where, type Filters, type Range } from "./accesslog-query";
+import { listEntries, RANGES, serviceTraffic, stats, where, type Filters, type Range } from "./accesslog-query";
 import { dataDir, db, dbPath, settings } from "./db";
 
 /**
@@ -216,10 +216,15 @@ export const entries = (f: Filters, before: number | null, limit: number) => lis
 // --- Stats, computed in a worker ---
 
 type Stats = ReturnType<typeof stats>;
+type Traffic = ReturnType<typeof serviceTraffic>;
+/** What the worker computes: the Requests page's stats, or the Services list's traffic column. */
+export type WorkerJob = { kind: "stats"; filters: Filters } | { kind: "traffic" };
+
 /** How long a range's stats are reused: a week of requests takes a while to add up. */
 const STATS_TTL: Record<Range, number> = { "1h": 2000, "24h": 10_000, "7d": 30_000 };
-const statsCache = new Map<string, { at: number; stats: Promise<Stats> }>();
-const pending = new Map<number, { resolve: (s: Stats) => void; reject: (e: Error) => void }>();
+const TRAFFIC_TTL = 30_000;
+const cache = new Map<string, { at: number; ttl: number; result: Promise<unknown> }>();
+const pending = new Map<number, { resolve: (r: unknown) => void; reject: (e: Error) => void }>();
 let worker: Worker | null = null;
 let nextId = 1;
 
@@ -227,11 +232,11 @@ function statsWorker() {
   if (worker) return worker;
   // A path relative to this file, which build.ts also compiles into the binary.
   const w = new Worker(new URL("./accesslog-worker.ts", import.meta.url).href);
-  w.onmessage = (e: MessageEvent<{ id: number; result?: Stats; error?: string }>) => {
+  w.onmessage = (e: MessageEvent<{ id: number; result?: unknown; error?: string }>) => {
     const p = pending.get(e.data.id);
     pending.delete(e.data.id);
     if (e.data.error !== undefined) p?.reject(new Error(e.data.error));
-    else p?.resolve(e.data.result!);
+    else p?.resolve(e.data.result);
   };
   w.onerror = (e) => {
     for (const p of pending.values()) p.reject(new Error(e.message));
@@ -241,22 +246,30 @@ function statsWorker() {
   return (worker = w);
 }
 
-/** Stats for the filters, shared by every request for the same filters while fresh. */
-export function accessLogStats(f: Filters): Promise<Stats> {
-  where(f); // validates, before anything reaches the worker
-  const key = JSON.stringify(f);
+/** Runs a job in the worker, sharing its result with every caller asking the same while it's fresh. */
+function inWorker<T>(job: WorkerJob, ttl: number): Promise<T> {
+  const key = JSON.stringify(job);
   const now = Date.now();
-  const hit = statsCache.get(key);
-  if (hit && now - hit.at < STATS_TTL[f.range]) return hit.stats;
-  for (const [k, v] of statsCache) if (now - v.at > 60_000) statsCache.delete(k);
+  const hit = cache.get(key);
+  if (hit && now - hit.at < hit.ttl) return hit.result as Promise<T>;
+  for (const [k, v] of cache) if (now - v.at > Math.max(v.ttl, 60_000)) cache.delete(k);
   const id = nextId++;
-  const result = new Promise<Stats>((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    statsWorker().postMessage({ id, dbPath, filters: f });
+  const result = new Promise<T>((resolve, reject) => {
+    pending.set(id, { resolve: resolve as (r: unknown) => void, reject });
+    statsWorker().postMessage({ id, dbPath, job });
   });
-  result.catch(() => statsCache.delete(key));
-  statsCache.set(key, { at: now, stats: result });
+  result.catch(() => cache.delete(key));
+  cache.set(key, { at: now, ttl, result });
   return result;
 }
+
+/** Stats for the filters on the Requests page. */
+export function accessLogStats(f: Filters): Promise<Stats> {
+  where(f); // validates, before anything reaches the worker
+  return inWorker<Stats>({ kind: "stats", filters: f }, STATS_TTL[f.range]);
+}
+
+/** Each service's last 24 hours, for the Services list. */
+export const serviceTrafficSummary = () => inWorker<Traffic>({ kind: "traffic" }, TRAFFIC_TTL);
 
 export { FilterError, RANGES, type Filters, type Range } from "./accesslog-query";

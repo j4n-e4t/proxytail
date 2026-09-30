@@ -15,8 +15,20 @@ export interface ProxyHost {
   clientAuth: ClientAuth;
   clientCaIds: number[];
   clientCertHeaders: boolean;
+  headers: HostHeaders;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Whether browsers may show a service inside a frame: left to the service, same origin only, or never. */
+export type Framing = "service" | "sameorigin" | "deny";
+
+export interface HostHeaders {
+  /** Sends `X-Robots-Tag: noindex, nofollow`. */
+  noIndex: boolean;
+  framing: Framing;
+  /** Set on every request to the service; an empty value removes the header. */
+  requestHeaders: { name: string; value: string }[];
 }
 
 export type ProxyHostDraft = Pick<
@@ -31,6 +43,7 @@ export type ProxyHostDraft = Pick<
   | "clientAuth"
   | "clientCaIds"
   | "clientCertHeaders"
+  | "headers"
 > & {
   /** Omit `password` to keep the stored one; `previous` is the username before a rename. */
   basicAuthUsers: { username: string; password?: string; previous?: string }[];
@@ -106,6 +119,7 @@ export interface CertInfo {
   state: "valid" | "untrusted" | "pending" | "error";
   issuer?: string;
   subject?: string;
+  validFrom?: string;
   validTo?: string;
   error?: string;
   checkedAt: string;
@@ -149,6 +163,17 @@ export interface RateLimitView {
   valkey: ValkeyStatus | null;
   /** The services' middlewares in Traefik, while on. Null while Traefik is unreachable. */
   traefik: { enabled: number; errors: string[] } | null;
+}
+
+/** A service's last 24 hours on the Services list. */
+export interface ServiceTraffic {
+  requests: number;
+  clientErrors: number;
+  serverErrors: number;
+  /** Requests per hour, oldest first; the last one is the current hour. */
+  hourly: number[];
+  p95Ms: number | null;
+  lastRequest: string | null;
 }
 
 export type AccessLogRange = "1h" | "24h" | "7d";
@@ -260,6 +285,8 @@ export const api = {
       "GET",
       `/api/access-log/entries?${query(f, before ? { before: String(before) } : {})}`,
     ),
+  serviceTraffic: () =>
+    request<{ hourStart: string; services: Record<number, ServiceTraffic> }>("GET", "/api/access-log/services"),
   accessLogStats: (f: AccessLogFilters) => request<AccessLogStats>("GET", `/api/access-log/stats?${query(f)}`),
   rateLimit: () => request<RateLimitView>("GET", "/api/rate-limit"),
   saveRateLimit: (c: Partial<RateLimitConfig>) => request<RateLimitView>("PUT", "/api/rate-limit", c),

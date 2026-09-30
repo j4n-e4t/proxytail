@@ -148,3 +148,58 @@ export function stats(db: Database, f: Filters) {
     ).all(w.params),
   };
 }
+
+/** The Services list's traffic column: each service's last 24 hours, in hourly buckets. */
+export function serviceTraffic(db: Database) {
+  const hour = 3_600_000;
+  // 24 buckets, the last one being the current hour.
+  const first = Math.floor(Date.now() / hour) * hour - 23 * hour;
+  const params = { since: first };
+  const q = <T>(sql: string) => db.query<T, any>(sql).all(params);
+
+  const services = new Map<
+    number,
+    { requests: number; clientErrors: number; serverErrors: number; hourly: number[]; lastRequest: string | null; p95Ms: number | null }
+  >();
+  const service = (id: number) => {
+    let s = services.get(id);
+    if (!s) services.set(id, (s = { requests: 0, clientErrors: 0, serverErrors: 0, hourly: Array(24).fill(0), lastRequest: null, p95Ms: null }));
+    return s;
+  };
+
+  for (const r of q<{ id: number; t: number; n: number; c4: number; c5: number }>(
+    `SELECT host_id AS id, (time / ${hour}) * ${hour} AS t, count(*) AS n,
+       sum(status BETWEEN 400 AND 499) AS c4, sum(status >= 500) AS c5
+     FROM access_log WHERE time >= $since AND host_id IS NOT NULL GROUP BY id, t`,
+  )) {
+    const s = service(r.id);
+    s.requests += r.n;
+    s.clientErrors += r.c4;
+    s.serverErrors += r.c5;
+    const i = (r.t - first) / hour;
+    if (i >= 0 && i < 24) s.hourly[i] = (s.hourly[i] ?? 0) + r.n;
+  }
+
+  // p95 per service, from the same log-scaled histogram as the Requests page.
+  const bins = q<{ id: number; b: number; n: number }>(
+    `SELECT host_id AS id, CAST(round(ln(duration_ms + 0.001) * ${BINS_PER_E}) AS INT) AS b, count(*) AS n
+     FROM access_log WHERE time >= $since AND host_id IS NOT NULL GROUP BY id, b ORDER BY id, b`,
+  );
+  const seen = new Map<number, number>();
+  for (const { id, b, n } of bins) {
+    const s = service(id);
+    const total = (seen.get(id) ?? 0) + n;
+    seen.set(id, total);
+    if (s.p95Ms === null && total > s.requests * 0.95) s.p95Ms = Math.exp(b / BINS_PER_E) - 0.001;
+  }
+
+  // Also for services without requests today, so a quiet service shows when it was last used.
+  for (const r of db
+    .query<{ id: number; last: number }, []>(
+      "SELECT host_id AS id, max(time) AS last FROM access_log WHERE host_id IS NOT NULL GROUP BY host_id",
+    )
+    .all())
+    service(r.id).lastRequest = new Date(r.last).toISOString();
+
+  return { hourStart: new Date(first).toISOString(), services: Object.fromEntries(services) };
+}

@@ -13,7 +13,7 @@ import {
 import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { ProxyHost, TraefikStatus } from "@/lib/api";
+import type { CertInfo, ProxyHost, TraefikStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export function StatusDot({ status, className }: { status: "online" | "offline" | "unknown"; className?: string }) {
@@ -162,6 +162,47 @@ function daysUntil(iso?: string) {
   return iso ? Math.round((new Date(iso).getTime() - Date.now()) / 86_400_000) : undefined;
 }
 
+const bar = { success: "bg-success", warning: "bg-warning", danger: "bg-destructive" };
+
+/**
+ * Days left on a valid certificate, with a bar for the share of its lifetime that's left. Traefik renews Let's Encrypt
+ * certificates 30 days before they expire, so one that gets much closer than that isn't being renewed.
+ */
+function CertLifetime({ cert, days }: { cert: CertInfo; days: number }) {
+  const start = cert.validFrom ? new Date(cert.validFrom).getTime() : NaN;
+  const end = cert.validTo ? new Date(cert.validTo).getTime() : NaN;
+  const lifetime = (end - start) / 86_400_000;
+  const left = Number.isFinite(lifetime) && lifetime > 0 ? Math.min(1, Math.max(0, days / lifetime)) : null;
+  const t = days < 7 ? "danger" : days < 21 ? "warning" : "success";
+  const expires = cert.validTo
+    ? new Date(cert.validTo).toLocaleDateString(undefined, { dateStyle: "medium" })
+    : "an unknown date";
+  const tip = [
+    `Expires ${expires}${cert.issuer ? `, issued by ${cert.issuer}` : ""}.`,
+    t === "success"
+      ? "Traefik renews it about 30 days before it expires."
+      : "Traefik should have renewed it by now: check that port 80 is reachable from the internet.",
+  ].join(" ");
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div className="w-28 cursor-default space-y-1.5">
+          <p className={cn("flex items-center gap-1.5 text-sm font-medium tabular-nums", text[t])}>
+            <ShieldCheck className="size-3.5 shrink-0" />
+            {days === 1 ? "1 day left" : `${days} days left`}
+          </p>
+          {left !== null && (
+            <div className="h-1 overflow-hidden rounded-full bg-muted" aria-hidden>
+              <div className={cn("h-full rounded-full", bar[t])} style={{ width: `${left * 100}%` }} />
+            </div>
+          )}
+        </div>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-sm">{tip}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 /** HTTPS certificate state as observed on Traefik's websecure entrypoint. */
 export function CertCell({ host, traefik }: { host: ProxyHost; traefik: TraefikStatus | null }) {
   const cert = host.enabled && traefik?.reachable ? traefik.certificates?.[host.id] : undefined;
@@ -169,9 +210,7 @@ export function CertCell({ host, traefik }: { host: ProxyHost; traefik: TraefikS
   const days = daysUntil(cert.validTo);
   switch (cert.state) {
     case "valid":
-      return (
-        <Cell icon={ShieldCheck} t="success" label="Valid" tip={[`${days} days left`, cert.issuer].filter(Boolean).join(" · ")} />
-      );
+      return <CertLifetime cert={cert} days={days ?? 0} />;
     case "untrusted":
       return (
         <Cell

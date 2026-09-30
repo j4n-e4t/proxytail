@@ -27,6 +27,8 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PageHeader } from "@/components/page-header";
 import { DeviceBadge } from "@/components/device-badge";
+import { TrafficCell } from "@/components/traffic-cell";
+import { usePoll } from "@/hooks/use-poll";
 import { AccessCell, CertCell, ServiceIcon, serviceState, StateLabel } from "@/components/status";
 import { api, type Device, type ProxyHost, type TraefikStatus } from "@/lib/api";
 import { cn, targetUrl } from "@/lib/utils";
@@ -59,6 +61,7 @@ export function HostsPage(props: {
   const [query, setQuery] = useState("");
   const [deleting, setDeleting] = useState<ProxyHost | null>(null);
   const byId = useMemo(() => new Map(devices.map((d) => [d.id, d])), [devices]);
+  const traffic = usePoll(api.serviceTraffic, 60_000);
 
   const shown = (hosts ?? []).filter((h) =>
     [...h.domains, h.deviceName, h.targetIp, String(h.targetPort)].join(" ").toLowerCase().includes(query.toLowerCase()),
@@ -160,8 +163,9 @@ export function HostsPage(props: {
             <TableHeader>
               <TableRow className="hover:bg-transparent">
                 <TableHead className="pl-4">Service</TableHead>
-                <TableHead className="w-[24%]">Target</TableHead>
-                <TableHead className="w-36">HTTPS</TableHead>
+                <TableHead className="w-[22%]">Target</TableHead>
+                <TableHead className="w-44">Traffic (24h)</TableHead>
+                <TableHead className="w-36">Certificate</TableHead>
                 <TableHead className="w-32">Access</TableHead>
                 <TableHead className="w-20">Enabled</TableHead>
                 <TableHead className="w-12" />
@@ -222,6 +226,9 @@ export function HostsPage(props: {
                       </div>
                     </TableCell>
                     <TableCell>
+                      <TrafficCell traffic={traffic.data?.services[h.id]} onClick={() => props.onViewRequests(h)} />
+                    </TableCell>
+                    <TableCell>
                       <CertCell host={h} traefik={traefik} />
                     </TableCell>
                     <TableCell>
@@ -264,7 +271,7 @@ export function HostsPage(props: {
               })}
               {shown.length === 0 && (
                 <TableRow className="hover:bg-transparent">
-                  <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
+                  <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
                     No services match “{query}”.
                   </TableCell>
                 </TableRow>
