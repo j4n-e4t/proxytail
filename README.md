@@ -45,8 +45,9 @@ tailscale serve --bg --https=8443 http://127.0.0.1:3000
   point each hostname at the public address, and persist the `traefik-acme` volume so certificates survive restarts.
   Plain HTTP is redirected to HTTPS, and each service is served with a one-year HSTS header so browsers won't fall
   back to HTTP afterwards.
-- The sidebar shows the versions of Tailscale and Traefik, and of Valkey while rate limiting uses it. For Tailscale,
-  that's the proxy host's client: the device whose endpoints include the public address set under **Settings**.
+- **Settings** opens with the state of Tailscale, Traefik, rate limiting and the request log, including the versions
+  of Tailscale, Traefik and Valkey. Each tile opens its section. For Tailscale, the version is the proxy host's
+  client: the device whose endpoints include the public address set under **Settings → General**.
 - Peers come from the Tailscale API through an OAuth client. Create one under **Settings → OAuth clients** in the admin
   console with only the `devices:core:read` scope: a leaked secret then exposes your device list and nothing else.
 - All containers run as unprivileged users, read-only and without capabilities. See [Hardening](#hardening).
@@ -55,7 +56,7 @@ tailscale serve --bg --https=8443 http://127.0.0.1:3000
 
 Then, in the UI:
 
-1. **Settings:** set the public address, meaning the IP your domains point at. **Detect** fills in this machine's
+1. **Settings → General:** set the public address, meaning the IP your domains point at. **Detect** fills in this machine's
    public IP.
 2. **Domains:** add a domain and create the wildcard record it shows, e.g. `*.example.com A 203.0.113.10`. The domain is
    verified against public DNS resolvers.
@@ -65,7 +66,7 @@ Then, in the UI:
    [Rate limiting](#rate-limiting).
 6. **Requests:** watch the traffic your services get, or pick **View requests** in a service's menu.
 
-Only peers tagged `tag:proxytail-backend` are listed and can be targeted. Change the tag under **Settings** or with
+Only peers tagged `tag:proxytail-backend` are listed and can be targeted. Change the tag under **Settings → Tailscale** or with
 `TS_BACKEND_TAG`. Define the tag under `tagOwners` in your tailnet policy and apply it to each backend, e.g.
 `tailscale up --advertise-tags=tag:proxytail-backend`. The policy must also allow the proxy host to reach those peers
 (see [Security model](#security-model)).

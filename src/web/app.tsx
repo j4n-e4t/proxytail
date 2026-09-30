@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
-  Database,
   Globe,
   Monitor,
   MonitorSmartphone,
@@ -19,8 +18,6 @@ import { Card, CardDescription, CardFooter, CardHeader, CardTitle } from "@/comp
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { TailscaleIcon, TraefikIcon } from "@/components/brand-icons";
-import { StatusDot } from "@/components/status";
 import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import { useTheme, type Theme } from "@/lib/theme";
@@ -31,7 +28,7 @@ import { RequestsPage } from "@/pages/requests";
 import { ServiceEditorDialog } from "@/pages/service-editor";
 import { DomainsPage } from "@/pages/domains";
 import { HostsPage } from "@/pages/hosts";
-import { SettingsPage } from "@/pages/settings";
+import { isSettingsSection, SettingsPage } from "@/pages/settings";
 import "./globals.css";
 
 type Page = "services" | "requests" | "domains" | "client-cas" | "peers" | "settings";
@@ -87,34 +84,6 @@ function NavItem(props: { icon: LucideIcon; label: string; active: boolean; coun
   );
 }
 
-function ServiceStatus(props: {
-  icon: React.ComponentType<{ className?: string }>;
-  ok: boolean;
-  label: string;
-  detail: string;
-  title?: string;
-}) {
-  const Icon = props.icon;
-  return (
-    <div className="flex items-center gap-2.5 px-3 py-1.5" title={props.title}>
-      <div className="relative flex size-7 shrink-0 items-center justify-center rounded-md border bg-background">
-        <Icon className="size-3.5 text-foreground/80" />
-        <StatusDot
-          status={props.ok ? "online" : "offline"}
-          className={cn(
-            "absolute -right-0.5 -bottom-0.5 rounded-full ring-2 ring-sidebar",
-            !props.ok && "[&>span]:bg-destructive",
-          )}
-        />
-      </div>
-      <div className="min-w-0 leading-tight">
-        <p className="text-xs font-medium">{props.label}</p>
-        <p className="truncate text-xs text-muted-foreground">{props.detail}</p>
-      </div>
-    </div>
-  );
-}
-
 function Brand() {
   return (
     <div className="flex h-16 items-center gap-2.5 px-5">
@@ -157,13 +126,11 @@ function Console() {
   const setPage = (p: Page) => navigate(p);
   const { theme, setTheme } = useTheme();
   const hosts = usePoll(api.hosts, 0);
-  // Polled for the proxy host's Tailscale version, known once devices have been listed.
+  // Polled for the proxy host's Tailscale version on the Settings page, known once devices have been listed.
   const settings = usePoll(api.settings, 30_000);
   const domains = usePoll(api.domains, 0);
   const clientCas = usePoll(api.clientCas, 0);
   const traefik = usePoll(api.traefik, 5000);
-  const rateLimit = usePoll(api.rateLimit, 30_000);
-  const valkey = rateLimit.data?.config.enabled && rateLimit.data.config.store === "valkey" ? rateLimit.data.valkey : null;
   const devices = usePoll(
     useCallback(() => api.devices(), []),
     30_000,
@@ -232,43 +199,8 @@ function Console() {
           />
         </nav>
 
-        <div className="space-y-1 border-t p-3">
-          {/* Connection state of the systems proxytail drives. */}
-          <div className="space-y-0.5">
-            <ServiceStatus
-              icon={TailscaleIcon}
-              ok={configured && !devices.error}
-              label="Tailscale"
-              detail={
-                !configured
-                  ? "Not configured"
-                  : devices.error
-                    ? "Error"
-                    : settings.data?.tailscaleVersion
-                      ? `v${settings.data.tailscaleVersion}`
-                      : "Connected"
-              }
-              title={devices.error ?? undefined}
-            />
-            <ServiceStatus
-              icon={TraefikIcon}
-              ok={!!traefik.data?.reachable}
-              label="Traefik"
-              detail={traefik.data?.reachable ? `v${traefik.data.version}` : "Unreachable"}
-              title={traefik.data?.error}
-            />
-            {/* Only while rate limiting counts in Valkey. */}
-            {valkey && (
-              <ServiceStatus
-                icon={Database}
-                ok={valkey.reachable && !valkey.error}
-                label={valkey.server ?? "Valkey"}
-                detail={!valkey.reachable ? "Unreachable" : valkey.error ? "Error" : valkey.version ? `v${valkey.version}` : "Connected"}
-                title={valkey.error}
-              />
-            )}
-          </div>
-          <div className="flex items-center justify-between px-3 pt-2">
+        <div className="border-t p-3">
+          <div className="flex items-center justify-between px-3 py-1">
             <span className="text-xs text-muted-foreground">Theme</span>
             <ToggleGroup
               type="single"
@@ -348,8 +280,12 @@ function Console() {
           )}
           {page === "settings" && settings.data && (
             <SettingsPage
+              section={isSettingsSection(route.sub) ? route.sub : "general"}
+              onSection={(s) => navigate(s === "general" ? "settings" : `settings/${s}`)}
               settings={settings.data}
               traefik={traefik.data}
+              devices={devices.data}
+              devicesError={devices.error}
               onSaved={(s) => {
                 settings.setData(s);
                 devices.reload();

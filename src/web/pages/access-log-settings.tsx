@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ToneBadge } from "@/components/status";
 import { usePoll } from "@/hooks/use-poll";
-import { api } from "@/lib/api";
+import { api, type AccessLogStatus } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
 
 const fmt = new Intl.NumberFormat();
@@ -23,7 +23,14 @@ function Stat(props: { label: string; value: React.ReactNode; detail?: React.Rea
   );
 }
 
-export function AccessLogCard({ className }: { className?: string }) {
+/** `onChanged`: called with the saved state, e.g. to update a status elsewhere on the page. */
+export function AccessLogCard({
+  className,
+  onChanged,
+}: {
+  className?: string;
+  onChanged?: (s: AccessLogStatus) => void;
+}) {
   const view = usePoll(api.accessLog, 10_000);
   const [days, setDays] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -39,6 +46,7 @@ export function AccessLogCard({ className }: { className?: string }) {
     try {
       const next = await api.saveAccessLog(Number(days));
       view.setData(next);
+      onChanged?.(next);
       setDays(String(next.retentionDays));
       toast.success("Request log saved");
     } catch (e) {

@@ -95,7 +95,8 @@ function Problems({ view }: { view: RateLimitView }) {
   return null;
 }
 
-export function RateLimitCard({ className }: { className?: string }) {
+/** `onChanged`: called with the saved state, e.g. to update a status elsewhere on the page. */
+export function RateLimitCard({ className, onChanged }: { className?: string; onChanged?: (v: RateLimitView) => void }) {
   const view = usePoll(api.rateLimit, 10_000);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [busy, setBusy] = useState(false);
@@ -122,6 +123,7 @@ export function RateLimitCard({ className }: { className?: string }) {
         burst: Number(draft.burst),
       });
       view.setData(next);
+      onChanged?.(next);
       setDraft(toDraft(next.config));
       toast.success("Rate limiting saved", { description: "Traefik picks it up within about 5 seconds." });
     } catch (e) {
