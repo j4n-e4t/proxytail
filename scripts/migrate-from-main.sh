@@ -5,9 +5,9 @@
 #   scripts/migrate-from-main.sh            # back up, build, switch over, check
 #   scripts/migrate-from-main.sh rollback   # undo, then `git checkout main && docker compose up -d --remove-orphans`
 #
-# Your data stays in the same volumes: the database has no schema changes between main and this branch, and the
-# Let's Encrypt certificates are kept, so nothing is reissued. Services are down for the few seconds the containers
-# are recreated.
+# Your data stays in the same volumes, and the Let's Encrypt certificates are kept, so nothing is reissued. The
+# database only gains tables and columns, so main still runs on it after a rollback. Services are down for the few
+# seconds the containers are recreated.
 set -eu
 
 cd "$(dirname "$0")/.."

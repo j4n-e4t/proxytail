@@ -64,7 +64,8 @@ Then, in the UI:
    route goes live within about 5 seconds. The list
    shows each service's last 24 hours (requests per hour, 5xx rate, 95th percentile response time) and the days left
    on its certificate, turning orange below 21 days and red below 7: Traefik renews at 30.
-4. Optionally, **Client CAs:** require client certificates for a service. See [Client certificates (mTLS)](#client-certificates-mtls).
+4. Optionally, **Security → Basic auth users** or **Client CAs:** ask for a password or a client certificate before a
+   service. See [Basic auth](#basic-auth) and [Client certificates (mTLS)](#client-certificates-mtls).
 5. Optionally, **Security → Rate limiting:** limit how many requests each client IP can make. See
    [Rate limiting](#rate-limiting).
 6. **Requests:** watch the traffic your services get, or pick **View requests** in a service's menu.
@@ -91,6 +92,25 @@ certificate requirement and HSTS. Requests to either count towards the service o
 
 Services created with several hostnames keep the first one, and the others become parallel aliases. Unlike before,
 the service now sees its own hostname for those, instead of the alias.
+
+## Basic auth
+
+Users are managed on their own page, **Security → Basic auth users**, and attached to services, like client CAs:
+
+1. **Basic auth users:** add a username and a password (at least 8 characters). Passwords are stored as bcrypt hashes
+   and can't be shown again.
+2. **Services:** turn on **Basic auth** in the Authentication tab and check who can sign in.
+
+A user has the same password on every service they're attached to, so changing it there changes it everywhere. Traefik
+strips the credentials before the request reaches the service.
+
+- A user who can still sign in to a service can't be deleted, and a service can't be saved with a user that no longer
+  exists. The database enforces both.
+- Should a service with basic auth ever end up without users anyway, proxytail fails closed: it doesn't route the
+  service, and the UI shows it as **Not routed**.
+- Users from before, when every service had its own, became shared users. The same username with the same password
+  hash became one user; same-named users with different passwords stay separate, since their passwords can't be
+  compared. Give one of them a new password and attach it instead, then delete the others.
 
 ## Client certificates (mTLS)
 
@@ -147,8 +167,9 @@ the service. It doesn't keep anyone out.
 
 The `crowdsec` branch isn't published to GHCR yet, so the migration builds the app on the proxy host.
 `scripts/migrate-from-main.sh` moves a running `main` stack over. Your services, domains, client CAs,
-settings and Let's Encrypt certificates stay in the same volumes: the database schema is unchanged, and nothing is
-reissued.
+settings and Let's Encrypt certificates stay in the same volumes, and nothing is reissued. Basic auth users become
+shared users on the first start (see [Basic auth](#basic-auth)); the database keeps them the way `main` stores them
+too, so `main` still runs on it after a rollback, with the users from before the migration.
 
 ```sh
 cd /path/to/proxytail            # the checkout main's stack was started from, with its .env

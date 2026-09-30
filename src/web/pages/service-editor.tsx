@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { ArrowRight, Globe, KeyRound, Loader2, Plus, ShieldCheck, Trash2, X } from "lucide-react";
+import { ArrowRight, Globe, KeyRound, Loader2, Plus, ShieldCheck, X } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ import { DevicePicker } from "@/components/device-picker";
 import { ServiceIcon, serviceState } from "@/components/status";
 import {
   api,
+  type BasicAuthUser,
   type ClientAuth,
   type ClientCa,
   type Device,
@@ -31,9 +32,11 @@ interface EditorProps {
   peerTag: string;
   domains: Domain[] | null;
   clientCas: ClientCa[] | null;
+  basicAuthUsers: BasicAuthUser[] | null;
   traefik: TraefikStatus | null;
   onOpenDomains: () => void;
   onOpenClientCas: () => void;
+  onOpenUsers: () => void;
   onCancel: () => void;
   onSaved: () => void;
 }
@@ -42,7 +45,11 @@ interface EditorProps {
 export function ServiceEditorDialog(
   props: EditorProps & { open: boolean; hosts: ProxyHost[] | null; hostId: number | null; initialDeviceId?: string },
 ) {
-  const loading = props.domains === null || props.clientCas === null || (props.hostId !== null && props.hosts === null);
+  const loading =
+    props.domains === null ||
+    props.clientCas === null ||
+    props.basicAuthUsers === null ||
+    (props.hostId !== null && props.hosts === null);
   const existing = props.hostId !== null ? props.hosts?.find((h) => h.id === props.hostId) : undefined;
   return (
     <Dialog open={props.open} onOpenChange={(open) => !open && props.onCancel()}>
@@ -66,6 +73,7 @@ export function ServiceEditorDialog(
             {...props}
             domains={props.domains!}
             clientCas={props.clientCas!}
+            basicAuthUsers={props.basicAuthUsers!}
             existing={existing ?? null}
           />
         )}
@@ -117,19 +125,14 @@ function splitHostname(hostname: string, domains: Domain[]): DomainRow {
 
 const joinHostname = ({ sub, base }: DomainRow) => (sub.trim() ? `${sub.trim().toLowerCase()}.${base}` : base);
 
-interface UserRow {
-  /** Stable React key. */
-  key: number;
-  username: string;
-  password: string;
-  /** Username as stored on the server; unset for new users. */
-  previous?: string;
-}
-
-let nextKey = 0;
-
 function ServiceForm(
-  props: EditorProps & { domains: Domain[]; clientCas: ClientCa[]; existing: ProxyHost | null; initialDeviceId?: string },
+  props: EditorProps & {
+    domains: Domain[];
+    clientCas: ClientCa[];
+    basicAuthUsers: BasicAuthUser[];
+    existing: ProxyHost | null;
+    initialDeviceId?: string;
+  },
 ) {
   const { existing } = props;
   const verified = props.domains.filter((d) => d.verified);
@@ -148,9 +151,7 @@ function ServiceForm(
   const [skipVerify, setSkipVerify] = useState(existing?.insecureSkipVerify ?? false);
   const [enabled, setEnabled] = useState(existing?.enabled ?? true);
   const [basicAuth, setBasicAuth] = useState(existing?.basicAuth ?? false);
-  const [users, setUsers] = useState<UserRow[]>(
-    () => existing?.basicAuthUsers.map((u) => ({ key: nextKey++, username: u.username, password: "", previous: u.username })) ?? [],
-  );
+  const [userIds, setUserIds] = useState<number[]>(existing?.basicAuthUserIds ?? []);
   const [clientAuth, setClientAuth] = useState<ClientAuth>(existing?.clientAuth ?? "off");
   // Preselect the only CA, the common case.
   const [caIds, setCaIds] = useState<number[]>(() =>
@@ -175,13 +176,10 @@ function ServiceForm(
 
   const setRow = (i: number, patch: Partial<DomainRow>) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
-  const setUser = (key: number, patch: Partial<UserRow>) =>
-    setUsers((us) => us.map((u) => (u.key === key ? { ...u, ...patch } : u)));
-  const addUser = () => setUsers((us) => [...us, { key: nextKey++, username: "", password: "" }]);
-
   const toggleBasicAuth = (on: boolean) => {
     setBasicAuth(on);
-    if (on && !users.length) addUser();
+    // Preselect the only user, the common case.
+    if (on && !userIds.length && props.basicAuthUsers.length === 1) setUserIds([props.basicAuthUsers[0]!.id]);
   };
 
   const submit = async (e: FormEvent) => {
@@ -195,6 +193,7 @@ function ServiceForm(
     if (rows.some((r) => !r.base)) return invalid("domains", "Pick a domain for the hostname and every alias.");
     if (!deviceId) return invalid("target", "Pick the tailnet peer that runs this service.");
     if (!port) return invalid("target", "Enter the port your service is listening on.");
+    if (basicAuth && !userIds.length) return invalid("auth", "Pick at least one user who can sign in.");
     if (clientAuth !== "off" && !caIds.length)
       return invalid("auth", "Pick a CA to verify client certificates against.");
     const draft: ProxyHostDraft = {
@@ -206,13 +205,11 @@ function ServiceForm(
       insecureSkipVerify: scheme === "https" && skipVerify,
       enabled,
       basicAuth,
+      basicAuthUserIds: basicAuth ? userIds : [],
       clientAuth,
       clientCaIds: clientAuth === "off" ? [] : caIds,
       clientCertHeaders: clientAuth !== "off" && certHeaders,
       noIndex,
-      basicAuthUsers: users
-        .filter((u) => u.username.trim() || u.password)
-        .map((u) => ({ username: u.username.trim(), password: u.password || undefined, previous: u.previous })),
     };
     setSaving(true);
     try {
@@ -457,53 +454,45 @@ function ServiceForm(
               description="Ask visitors for a username and password. Credentials are stripped before reaching the service."
               action={<Switch checked={basicAuth} onCheckedChange={toggleBasicAuth} aria-label="Require basic auth" />}
             >
-              {basicAuth && (
-                <div className="space-y-2">
-                  <div className="grid grid-cols-[1fr_1fr_2.25rem] gap-2 text-xs font-medium text-muted-foreground">
-                    <span>Username</span>
-                    <span>Password</span>
-                  </div>
-                  {users.map((u) => (
-                    <div key={u.key} className="grid grid-cols-[1fr_1fr_2.25rem] gap-2">
-                      <Input
-                        value={u.username}
-                        onChange={(e) => setUser(u.key, { username: e.target.value.replace(/[\s:]/g, "") })}
-                        placeholder="alice"
-                        aria-label="Username"
-                        autoComplete="off"
-                        className="font-mono"
-                      />
-                      <Input
-                        type="password"
-                        value={u.password}
-                        onChange={(e) => setUser(u.key, { password: e.target.value })}
-                        placeholder={u.previous ? "•••••••• (unchanged)" : "At least 8 characters"}
-                        aria-label="Password"
-                        autoComplete="new-password"
-                        className="font-mono"
-                      />
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="text-muted-foreground"
-                        onClick={() => setUsers((us) => us.filter((x) => x.key !== u.key))}
-                        aria-label={`Remove ${u.username || "user"}`}
-                      >
-                        <Trash2 />
-                      </Button>
-                    </div>
-                  ))}
-                  <div className="flex items-center justify-between gap-4">
-                    <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <KeyRound className="size-3" /> Stored as bcrypt hashes; passwords can't be shown again.
-                    </p>
-                    <Button type="button" variant="ghost" size="sm" className="text-muted-foreground" onClick={addUser}>
-                      <Plus /> Add user
+              {basicAuth &&
+                (props.basicAuthUsers.length === 0 ? (
+                  <div className="flex items-center justify-between gap-4 rounded-lg border border-dashed p-4">
+                    <p className="text-sm text-muted-foreground">You haven't added a user yet.</p>
+                    <Button type="button" variant="outline" size="sm" onClick={props.onOpenUsers}>
+                      <KeyRound /> Manage users
                     </Button>
                   </div>
-                </div>
-              )}
+                ) : (
+                  <div className="space-y-2">
+                    <Label>Who can sign in</Label>
+                    <div className="divide-y rounded-lg border">
+                      {props.basicAuthUsers.map((u) => {
+                        const id = `user-${u.id}`;
+                        return (
+                          <label key={u.id} htmlFor={id} className="flex cursor-pointer items-center gap-3 px-3 py-2.5">
+                            <Checkbox
+                              id={id}
+                              checked={userIds.includes(u.id)}
+                              onCheckedChange={(v) =>
+                                setUserIds((ids) => (v === true ? [...ids, u.id] : ids.filter((x) => x !== u.id)))
+                              }
+                            />
+                            <span className="min-w-0 flex-1 truncate font-mono text-sm">{u.username}</span>
+                            <span className="text-xs text-muted-foreground">
+                              {u.hostIds.length} {u.hostIds.length === 1 ? "service" : "services"}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      A user's password is the same on every service they can sign in to.{" "}
+                      <button type="button" className="underline" onClick={props.onOpenUsers}>
+                        Manage users
+                      </button>
+                    </p>
+                  </div>
+                ))}
             </Section>
 
             <Section

@@ -65,6 +65,13 @@ export function serviceState(host: ProxyHost, traefik: TraefikStatus | null): Se
       label: "Not routed",
       detail: "Client certificates are required but no CA is attached, so Traefik doesn't serve this service.",
     };
+  if (host.basicAuth && !host.basicAuthUserIds.length)
+    return {
+      tone: "danger",
+      icon: ShieldX,
+      label: "Not routed",
+      detail: "Basic auth is on but no user is attached, so Traefik doesn't serve this service.",
+    };
   if (!traefik?.reachable)
     return { tone: "muted", icon: Globe, label: "Unknown", detail: "Traefik is unreachable, so the state is unknown." };
   const r = traefik.routers[host.id];

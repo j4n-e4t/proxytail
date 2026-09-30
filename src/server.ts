@@ -13,6 +13,7 @@ import {
   type Range,
 } from "./accesslog";
 import {
+  basicAuthUsers,
   clientCas,
   domains as domainStore,
   hosts,
@@ -155,9 +156,21 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
     targetIp = existing.targetIp;
   }
 
-  const basicAuthUsers = await validateBasicAuth(raw.basicAuthUsers, existing?.basicAuthUsers ?? []);
   const basicAuth = !!raw.basicAuth;
-  if (basicAuth && !basicAuthUsers.length) throw new HttpError(400, "Add at least one user to enable basic auth");
+  const basicAuthUserIds =
+    !basicAuth || !Array.isArray(raw.basicAuthUserIds) ? [] : [...new Set<number>(raw.basicAuthUserIds.map(Number))];
+  // Existence is checked again atomically when the service is written (see saveHost).
+  if (basicAuth) {
+    if (!basicAuthUserIds.length) throw new HttpError(400, "Pick at least one user who can sign in");
+    const names = new Set<string>();
+    for (const id of basicAuthUserIds) {
+      const user = basicAuthUsers.get(id);
+      if (!user) throw new HttpError(400, `User ${id} does not exist`);
+      if (names.has(user.username))
+        throw new HttpError(400, `Two of the users are named ${user.username}: pick one, or rename the other`);
+      names.add(user.username);
+    }
+  }
 
   const clientAuth = (raw.clientAuth ?? "off") as ClientAuth;
   if (!["off", "require", "optional"].includes(clientAuth))
@@ -181,7 +194,7 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
     insecureSkipVerify: !!raw.insecureSkipVerify,
     enabled: raw.enabled === undefined ? true : !!raw.enabled,
     basicAuth,
-    basicAuthUsers,
+    basicAuthUserIds,
     clientAuth,
     clientCaIds,
     clientCertHeaders: clientAuth !== "off" && !!raw.clientCertHeaders,
@@ -192,37 +205,44 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
 const USERNAME_RE = /^[^\s:]{1,64}$/;
 const MIN_PASSWORD = 8;
 
-/**
- * Resolves submitted basic auth users to stored credentials. A user without a password keeps the hash stored under
- * `previous` (its name before a rename) or its current name.
- */
-async function validateBasicAuth(raw: unknown, existing: BasicAuthUser[]): Promise<BasicAuthUser[]> {
-  if (!Array.isArray(raw)) return [];
-  const users: BasicAuthUser[] = [];
-  for (const u of raw as { username?: unknown; password?: unknown; previous?: unknown; hash?: unknown }[]) {
-    const username = String(u.username ?? "").trim();
-    if (!USERNAME_RE.test(username))
-      throw new HttpError(400, `Invalid username "${username}": use up to 64 characters without spaces or colons`);
-    if (users.some((x) => x.username === username)) throw new HttpError(400, `Duplicate username: ${username}`);
-    const password = typeof u.password === "string" ? u.password : "";
-    if (password) {
-      if (password.length < MIN_PASSWORD)
-        throw new HttpError(400, `Password for ${username} must be at least ${MIN_PASSWORD} characters`);
-      // Traefik's htpasswd parser recognises the $2y$ bcrypt prefix; the hash itself is identical to $2b$.
-      const hash = (await Bun.password.hash(password, { algorithm: "bcrypt", cost: 10 })).replace(/^\$2b\$/, "$2y$");
-      users.push({ username, hash });
-      continue;
-    }
-    const previous = typeof u.previous === "string" ? u.previous : username;
-    const kept = existing.find((x) => x.username === previous);
-    if (!kept) throw new HttpError(400, `Set a password for ${username}`);
-    users.push({ username, hash: kept.hash });
-  }
-  return users;
+function validateUsername(raw: unknown, except?: number) {
+  const username = String(raw ?? "").trim();
+  if (!USERNAME_RE.test(username))
+    throw new HttpError(400, `Invalid username "${username}": use up to 64 characters without spaces or colons`);
+  if (basicAuthUsers.list().some((u) => u.username === username && u.id !== except))
+    throw new HttpError(409, `There's already a user named ${username}`);
+  return username;
 }
 
-/** Hosts as returned by the API: password hashes never leave the server. */
-const hostView = (h: ProxyHost) => ({ ...h, basicAuthUsers: h.basicAuthUsers.map((u) => ({ username: u.username })) });
+async function hashPassword(raw: unknown) {
+  const password = typeof raw === "string" ? raw : "";
+  if (password.length < MIN_PASSWORD) throw new HttpError(400, `The password must be at least ${MIN_PASSWORD} characters`);
+  // Traefik's htpasswd parser recognises the $2y$ bcrypt prefix; the hash itself is identical to $2b$.
+  return (await Bun.password.hash(password, { algorithm: "bcrypt", cost: 10 })).replace(/^\$2b\$/, "$2y$");
+}
+
+/** Users as returned by the API, with the services they can sign in to. Password hashes never leave the server. */
+function userView(u: BasicAuthUser, all = hosts.list()) {
+  return {
+    id: u.id,
+    username: u.username,
+    createdAt: u.createdAt,
+    updatedAt: u.updatedAt,
+    hostIds: all.filter((h) => h.basicAuthUserIds.includes(u.id)).map((h) => h.id),
+  };
+}
+
+function getUser(raw: string) {
+  const user = basicAuthUsers.get(parseId(raw));
+  if (!user) throw new HttpError(404, "User not found");
+  return user;
+}
+
+/** Hosts as returned by the API, with the names of their users. */
+function hostView(h: ProxyHost, users = basicAuthUsers.list()) {
+  const byId = new Map(users.map((u) => [u.id, u.username]));
+  return { ...h, basicAuthUsers: h.basicAuthUserIds.map((id) => ({ id, username: byId.get(id) ?? "" })) };
+}
 
 function domainView(d: ReturnType<typeof domainStore.list>[number]) {
   const all = hosts.list();
@@ -237,12 +257,13 @@ function domainView(d: ReturnType<typeof domainStore.list>[number]) {
 const isForeignKeyError = (e: unknown) =>
   e instanceof SQLiteError && !!e.code?.startsWith("SQLITE_CONSTRAINT") && e.message.includes("FOREIGN KEY");
 
-/** Writes a service. A CA deleted since validation fails the write instead of being dropped from the service. */
+/** Writes a service. A CA or user deleted since validation fails the write instead of being dropped from the service. */
 function saveHost<T>(write: () => T): T {
   try {
     return write();
   } catch (e) {
-    if (isForeignKeyError(e)) throw new HttpError(409, "One of the selected client CAs no longer exists. Reload and try again.");
+    if (isForeignKeyError(e))
+      throw new HttpError(409, "One of the selected client CAs or users no longer exists. Reload and try again.");
     throw e;
   }
 }
@@ -375,7 +396,10 @@ const server = Bun.serve({
     ...pageRoutes(),
 
     "/api/hosts": {
-      GET: handle(() => json(hosts.list().map(hostView))),
+      GET: handle(() => {
+        const users = basicAuthUsers.list();
+        return json(hosts.list().map((h) => hostView(h, users)));
+      }),
       POST: handle(async (req) => {
         const input = await validateHost(await body(req));
         const h = saveHost(() => hosts.create(input));
@@ -499,6 +523,47 @@ const server = Bun.serve({
             "Content-Disposition": `attachment; filename="${fileName(ca.name)}.pem"`,
           },
         });
+      }),
+    },
+
+    "/api/basic-auth-users": {
+      GET: handle(() => {
+        const all = hosts.list();
+        return json(basicAuthUsers.list().map((u) => userView(u, all)));
+      }),
+      POST: handle(async (req) => {
+        const b = await body<{ username?: string; password?: string }>(req);
+        const username = validateUsername(b.username);
+        return json(userView(basicAuthUsers.create(username, await hashPassword(b.password))), 201);
+      }),
+    },
+    "/api/basic-auth-users/:id": {
+      // A new username, a new password, or both. An empty password keeps the current one.
+      PATCH: handle(async (req) => {
+        const user = getUser(req.params.id);
+        const b = await body<{ username?: string; password?: string }>(req);
+        const username = b.username === undefined ? user.username : validateUsername(b.username, user.id);
+        const hash = b.password ? await hashPassword(b.password) : user.hash;
+        return json(userView(basicAuthUsers.update(user.id, { username, hash })!));
+      }),
+      DELETE: handle((req) => {
+        const user = getUser(req.params.id);
+        const inUse = () => {
+          const used = hosts.list().filter((h) => h.basicAuthUserIds.includes(user.id));
+          return new HttpError(
+            409,
+            `${user.username} can sign in to ${used.map((h) => h.domains[0]).join(", ") || "a service"}. Remove them from those services first.`,
+          );
+        };
+        if (hosts.list().some((h) => h.basicAuthUserIds.includes(user.id))) throw inUse();
+        try {
+          basicAuthUsers.delete(user.id);
+        } catch (e) {
+          // A service started using it since the check above.
+          if (isForeignKeyError(e)) throw inUse();
+          throw e;
+        }
+        return new Response(null, { status: 204 });
       }),
     },
 

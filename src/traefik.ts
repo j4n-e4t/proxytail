@@ -1,5 +1,5 @@
 import { certificateFor, type CertInfo } from "./certs";
-import { clientCas, hosts, type ProxyHost } from "./db";
+import { basicAuthUsers, clientCas, hosts, type ProxyHost } from "./db";
 import { rateLimitMiddleware } from "./ratelimit";
 
 // Every service is served over HTTPS with a Let's Encrypt certificate; plain HTTP is redirected by Traefik.
@@ -49,6 +49,7 @@ export function buildConfig() {
   const middlewares: Record<string, unknown> = {};
   const tlsOptions: Record<string, unknown> = {};
   const cas = new Map(clientCas.list().map((ca) => [ca.id, ca]));
+  const users = new Map(basicAuthUsers.list().map((u) => [u.id, u]));
   const rateLimit = rateLimitMiddleware();
 
   for (const h of hosts.list()) {
@@ -93,10 +94,16 @@ export function buildConfig() {
         chain.push(`${name}-client-cert-strip`, `${name}-client-cert`);
       }
     }
-    if (h.basicAuth && h.basicAuthUsers.length) {
+    const authUsers = h.basicAuth ? h.basicAuthUserIds.map((id) => users.get(id)).filter((u) => !!u) : [];
+    // Fail closed here too: basic auth without anyone to let in never publishes the service without the password check.
+    if (h.basicAuth && !authUsers.length) {
+      console.error(`Not routing ${h.domains[0]}: it requires basic auth but has no users`);
+      continue;
+    }
+    if (authUsers.length) {
       middlewares[`${name}-auth`] = {
         basicAuth: {
-          users: h.basicAuthUsers.map((u) => `${u.username}:${u.hash}`),
+          users: authUsers.map((u) => `${u.username}:${u.hash}`),
           realm: h.domains[0],
           // Don't leak the credentials to the upstream service.
           removeHeader: true,
