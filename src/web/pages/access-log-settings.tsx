@@ -3,7 +3,7 @@ import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ToneBadge } from "@/components/status";
@@ -23,19 +23,23 @@ function Stat(props: { label: string; value: React.ReactNode; detail?: React.Rea
   );
 }
 
-/** `onChanged`: called with the saved state, e.g. to update a status elsewhere on the page. */
-export function AccessLogCard({
-  className,
-  onChanged,
-}: {
-  className?: string;
+/** Retention and the state of the access log, from the Requests page. `onChanged` gets the saved state. */
+export function AccessLogSettingsDialog(props: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   onChanged?: (s: AccessLogStatus) => void;
 }) {
-  const view = usePoll(api.accessLog, 10_000);
+  const view = usePoll(api.accessLog, props.open ? 10_000 : 0);
   const [days, setDays] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const data = view.data;
 
+  // Starts from the saved value each time the dialog opens.
+  useEffect(() => {
+    if (props.open) view.reload();
+    setDays(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.open]);
   useEffect(() => {
     if (data && days === null) setDays(String(data.retentionDays));
   }, [data, days]);
@@ -46,9 +50,9 @@ export function AccessLogCard({
     try {
       const next = await api.saveAccessLog(Number(days));
       view.setData(next);
-      onChanged?.(next);
-      setDays(String(next.retentionDays));
+      props.onChanged?.(next);
       toast.success("Request log saved");
+      props.onOpenChange(false);
     } catch (e) {
       toast.error("Couldn't save the request log settings", { description: (e as Error).message });
     } finally {
@@ -57,46 +61,46 @@ export function AccessLogCard({
   };
 
   return (
-    <form onSubmit={save} className={className}>
-      <Card>
-        <CardHeader>
-          <CardTitle>Request log</CardTitle>
-          <CardDescription>
-            proxytail reads Traefik's access log and keeps each request for the <strong>Requests</strong> page.
-          </CardDescription>
-          <CardAction>
-            {data &&
-              (data.state === "ok" ? (
-                <ToneBadge t="success">
-                  <span className="size-1.5 rounded-full bg-current" /> Reading
-                </ToneBadge>
-              ) : data.state === "missing" ? (
-                <ToneBadge t="warning">No log yet</ToneBadge>
-              ) : (
-                <ToneBadge t="danger">Error</ToneBadge>
-              ))}
-          </CardAction>
-        </CardHeader>
-        <CardContent className="grid gap-6 lg:grid-cols-2">
-          <div className="grid content-start gap-2">
-            <Label htmlFor="access-log-days">Keep requests for</Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="access-log-days"
-                type="number"
-                min={1}
-                max={90}
-                value={days ?? ""}
-                onChange={(e) => setDays(e.target.value)}
-                className="w-28 font-mono"
-              />
-              <span className="text-sm text-muted-foreground">days</span>
+    <Dialog open={props.open} onOpenChange={props.onOpenChange}>
+      <DialogContent className="gap-0 p-0 sm:max-w-lg">
+        <form onSubmit={save}>
+          <DialogHeader className="px-6 pt-6 pb-4 text-left">
+            <div className="flex items-center justify-between gap-4 pr-6">
+              <DialogTitle>Request log</DialogTitle>
+              {data &&
+                (data.state === "ok" ? (
+                  <ToneBadge t="success">
+                    <span className="size-1.5 rounded-full bg-current" /> Reading
+                  </ToneBadge>
+                ) : data.state === "missing" ? (
+                  <ToneBadge t="warning">No log yet</ToneBadge>
+                ) : (
+                  <ToneBadge t="danger">Error</ToneBadge>
+                ))}
             </div>
-            <p className="text-xs text-muted-foreground">
-              Older requests are deleted, and at most a million are kept. Each holds only the time, client IP, target, status and response time.
-            </p>
-          </div>
-          <div className="grid content-start gap-4">
+            <DialogDescription>proxytail reads Traefik's access log and keeps each request for this page.</DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-5 px-6 pb-5">
+            <div className="grid gap-2">
+              <Label htmlFor="access-log-days">Keep requests for</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="access-log-days"
+                  type="number"
+                  min={1}
+                  max={90}
+                  value={days ?? ""}
+                  onChange={(e) => setDays(e.target.value)}
+                  className="w-28 font-mono"
+                />
+                <span className="text-sm text-muted-foreground">days</span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Older requests are deleted, and at most a million are kept. Each holds only the time, client IP, target,
+                status and response time.
+              </p>
+            </div>
             {data && (
               <div className="grid grid-cols-2 gap-4 rounded-lg border bg-muted/30 p-4">
                 <Stat
@@ -127,13 +131,17 @@ export function AccessLogCard({
               </Alert>
             )}
           </div>
-        </CardContent>
-        <CardFooter className="justify-end border-t">
-          <Button type="submit" disabled={busy || !data || days === String(data.retentionDays)}>
-            {busy && <Loader2 className="animate-spin" />} Save
-          </Button>
-        </CardFooter>
-      </Card>
-    </form>
+
+          <DialogFooter className="border-t px-6 py-4">
+            <Button type="button" variant="outline" onClick={() => props.onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={busy || !data || days === String(data.retentionDays)}>
+              {busy && <Loader2 className="animate-spin" />} Save
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

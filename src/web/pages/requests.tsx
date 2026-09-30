@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { FileWarning, Loader2, RefreshCw, Search, X } from "lucide-react";
+import { FileWarning, Loader2, RefreshCw, Search, Settings2, X } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,6 +13,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader } from "@/components/page-header";
 import { classColor, RequestTimeline, statusClass, TimelineLegend } from "@/components/request-timeline";
 import { usePoll } from "@/hooks/use-poll";
+import { AccessLogSettingsDialog } from "@/pages/access-log-settings";
 import {
   api,
   type AccessLogEntry,
@@ -136,6 +137,7 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const logStatus = usePoll(api.accessLog, 30_000);
+  const [logSettings, setLogSettings] = useState(false);
 
   // Typing searches after a pause, not on every key.
   useEffect(() => {
@@ -242,7 +244,17 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
         <Button variant="outline" size="icon" aria-label="Refresh" onClick={reload}>
           <RefreshCw />
         </Button>
+        <Button
+          variant="outline"
+          size="icon"
+          aria-label="Request log settings"
+          title="Request log settings"
+          onClick={() => setLogSettings(true)}
+        >
+          <Settings2 />
+        </Button>
       </PageHeader>
+      <AccessLogSettingsDialog open={logSettings} onOpenChange={setLogSettings} onChanged={logStatus.setData} />
 
       {logStatus.data && logStatus.data.state !== "ok" && (
         <Alert className="mb-4">

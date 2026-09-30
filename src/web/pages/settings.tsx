@@ -22,9 +22,8 @@ import { ToneBadge } from "@/components/status";
 import { usePoll } from "@/hooks/use-poll";
 import { api, type AccessLogStatus, type Device, type RateLimitView, type Settings, type TraefikStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { AccessLogCard } from "@/pages/access-log-settings";
 
-export type SettingsSection = "general" | "tailscale" | "traefik" | "request-log";
+export type SettingsSection = "general" | "tailscale" | "traefik";
 
 type Tone = "success" | "warning" | "danger" | "muted";
 
@@ -431,7 +430,6 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<
   { id: "general", label: "General", icon: Globe },
   { id: "tailscale", label: "Tailscale", icon: TailscaleIcon },
   { id: "traefik", label: "Traefik", icon: TraefikIcon },
-  { id: "request-log", label: "Request log", icon: Activity },
 ];
 
 /** The sidebar picks the section; the tiles above it show the state of everything proxytail drives. */
@@ -439,6 +437,7 @@ export function SettingsPage(props: {
   section: SettingsSection;
   onSection: (s: SettingsSection) => void;
   onOpenRateLimiting: () => void;
+  onOpenRequests: () => void;
   settings: Settings;
   traefik: TraefikStatus | null;
   devices: Device[] | null;
@@ -454,7 +453,6 @@ export function SettingsPage(props: {
       : { tone: "warning", state: "No public address" },
     tailscale: tailscaleHealth(props.settings, props.devices, props.devicesError),
     traefik: traefikHealth(props.traefik),
-    "request-log": requestLogHealth(accessLog.data),
   };
 
   const section = props.section;
@@ -486,7 +484,13 @@ export function SettingsPage(props: {
           active={false}
           onClick={props.onOpenRateLimiting}
         />
-        {tile("request-log")}
+        <StatusTile
+          icon={Activity}
+          label="Request log"
+          health={requestLogHealth(accessLog.data)}
+          active={false}
+          onClick={props.onOpenRequests}
+        />
       </div>
 
       <section aria-label={current.label} className="grid max-w-4xl grid-cols-1 gap-6">
@@ -500,7 +504,6 @@ export function SettingsPage(props: {
           />
         )}
         {section === "traefik" && <TraefikCard traefik={props.traefik} health={health.traefik} />}
-        {section === "request-log" && <AccessLogCard onChanged={accessLog.setData} />}
       </section>
     </>
   );

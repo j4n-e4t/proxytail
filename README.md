@@ -279,8 +279,8 @@ How it works:
 - Traefik writes its access log as JSON to the `traefik-logs` volume, with every field dropped except the start time,
   client IP, hostname, router (the service), status and duration.
 - proxytail follows the file, stores each request in its database, and empties the file once it has read it past
-  16 MB, so it needs write access to the volume. If it can't, **Settings → Request log** says so.
-- Requests are kept for 7 days by default (**Settings → Request log**, 1 to 90 days), and at most a million of them
+  16 MB, so it needs write access to the volume. If it can't, the request log settings on the Requests page say so.
+- Requests are kept for 7 days by default (the settings button on the Requests page, 1 to 90 days), and at most a million of them
   (`ACCESS_LOG_MAX_ROWS`). The figures for a period are computed in a background thread and reused for a few
   seconds, so a busy week doesn't slow down the UI.
 

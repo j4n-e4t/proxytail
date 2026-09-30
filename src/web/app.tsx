@@ -10,7 +10,6 @@ import {
   MonitorSmartphone,
   Moon,
   RefreshCw,
-  ScrollText,
   ShieldCheck,
   SlidersHorizontal,
   Sun,
@@ -235,7 +234,6 @@ function Console() {
       label: "Monitoring",
       items: [
         { target: "requests", label: "Requests", icon: Activity },
-        { target: "settings/request-log", label: "Request log", icon: ScrollText },
       ],
     },
     {
@@ -401,6 +399,7 @@ function Console() {
               section={isSettingsSection(route.sub) ? route.sub : "general"}
               onSection={(s) => navigate(s === "general" ? "settings" : `settings/${s}`)}
               onOpenRateLimiting={() => setPage("rate-limiting")}
+              onOpenRequests={() => setPage("requests")}
               settings={settings.data}
               traefik={traefik.data}
               devices={devices.data}
