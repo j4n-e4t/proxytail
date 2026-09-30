@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   Activity,
   ChevronDown,
+  Earth,
   Gauge,
   Globe,
   KeyRound,
@@ -206,6 +207,7 @@ function Console() {
   const clientCas = usePoll(api.clientCas, 0);
   const users = usePoll(api.basicAuthUsers, 0);
   const traefik = usePoll(api.traefik, 5000);
+  const countryDb = usePoll(api.countryDb, 60_000);
   const devices = usePoll(
     useCallback(() => api.devices(), []),
     30_000,
@@ -245,6 +247,7 @@ function Console() {
         { target: "settings", label: "General", icon: SlidersHorizontal },
         { target: "settings/tailscale", label: "Tailscale", icon: TailscaleIcon },
         { target: "settings/traefik", label: "Traefik", icon: TraefikIcon },
+        { target: "settings/countries", label: "Countries", icon: Earth },
       ],
     },
   ];
@@ -351,6 +354,8 @@ function Console() {
               key={route.params.get("service") ?? ""}
               hosts={hosts.data ?? []}
               initialService={route.params.get("service") ?? undefined}
+              countryDb={countryDb.data}
+              onOpenCountries={() => navigate("settings/countries")}
             />
           )}
           {page === "domains" && (
@@ -403,6 +408,8 @@ function Console() {
               onOpenRateLimiting={() => setPage("rate-limiting")}
               settings={settings.data}
               traefik={traefik.data}
+              countryDb={countryDb.data}
+              onCountryDbChanged={countryDb.setData}
               devices={devices.data}
               devicesError={devices.error}
               onSaved={(s) => {
@@ -426,9 +433,11 @@ function Console() {
         clientCas={clientCas.data}
         basicAuthUsers={users.data}
         traefik={traefik.data}
+        countryDb={countryDb.data}
         onOpenDomains={() => setPage("domains")}
         onOpenClientCas={() => setPage("client-cas")}
         onOpenUsers={() => setPage("users")}
+        onOpenCountries={() => navigate("settings/countries")}
         onCancel={() => setPage("services")}
         onSaved={() => {
           refreshHosts();

@@ -93,7 +93,7 @@ export function AccessLogCard({
               <span className="text-sm text-muted-foreground">days</span>
             </div>
             <p className="text-xs text-muted-foreground">
-              Older requests are deleted, and at most a million are kept. Each holds only the time, client IP, target, status and response time.
+              Older requests are deleted, and at most a million are kept. Each holds only the time, client IP and its country, target, status and response time.
             </p>
           </div>
           <div className="grid content-start gap-4">

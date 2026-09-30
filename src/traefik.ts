@@ -1,4 +1,5 @@
 import { certificateFor, type CertInfo } from "./certs";
+import { countryMiddleware } from "./countries";
 import { basicAuthUsers, clientCas, hosts, type ProxyHost } from "./db";
 import { rateLimitMiddleware } from "./ratelimit";
 
@@ -116,7 +117,13 @@ export function buildConfig() {
       middlewares[`${name}-host`] = { headers: { customRequestHeaders: { Host: hostname } } };
       chain.push(`${name}-host`);
     }
-    // Rate limiting goes first, so it also slows down guessing basic auth passwords. Each service has its own
+    // Country restrictions come before authentication, so visitors from elsewhere never see a password prompt.
+    if (h.countryMode !== "off") {
+      middlewares[`${name}-countries`] = countryMiddleware(h.countryMode, h.countries);
+      chain.unshift(`${name}-countries`);
+    }
+    // Rate limiting goes first, so it also slows down guessing basic auth passwords, and a flood doesn't reach the
+    // country check. Each service has its own
     // middleware, and so its own buckets.
     if (rateLimit) {
       middlewares[`${name}-ratelimit`] = rateLimit;

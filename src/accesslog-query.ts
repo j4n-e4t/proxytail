@@ -16,6 +16,8 @@ export interface Filters {
   /** "2xx" … "5xx", or an exact status code. */
   status?: string;
   ip?: string;
+  /** A country code, or "unknown" for addresses without one. */
+  country?: string;
   /** Searched in the hostname and client IP. */
   q?: string;
 }
@@ -47,6 +49,12 @@ export function where(f: Filters) {
     clauses.push("client_ip = $ip");
     params.ip = f.ip;
   }
+  if (f.country === "unknown") clauses.push("(country IS NULL OR country = '')");
+  else if (f.country) {
+    if (!/^[A-Z]{2}$/.test(f.country)) throw new FilterError("Country must be a two-letter code like DE");
+    clauses.push("country = $country");
+    params.country = f.country;
+  }
   if (f.q) {
     clauses.push(
       "(host LIKE $q ESCAPE '\\' OR client_ip LIKE $q ESCAPE '\\')",
@@ -64,6 +72,7 @@ interface Row {
   host_id: number | null;
   status: number;
   duration_ms: number;
+  country: string | null;
 }
 
 const toEntry = (r: Row) => ({
@@ -74,6 +83,7 @@ const toEntry = (r: Row) => ({
   serviceId: r.host_id,
   status: r.status,
   durationMs: r.duration_ms,
+  country: r.country || null,
 });
 
 /** The newest requests matching the filters, before the `before` id when paging. */
@@ -94,8 +104,8 @@ const BINS_PER_E = 20;
 export function stats(db: Database, f: Filters) {
   const w = where(f);
   const q = <T>(sql: string) => db.query<T, any>(sql);
-  const totals = q<{ requests: number; clients: number; clientErrors: number; serverErrors: number }>(
-    `SELECT count(*) AS requests, count(DISTINCT client_ip) AS clients,
+  const totals = q<{ requests: number; clients: number; countries: number; clientErrors: number; serverErrors: number }>(
+    `SELECT count(*) AS requests, count(DISTINCT client_ip) AS clients, count(DISTINCT nullif(country, '')) AS countries,
        coalesce(sum(status BETWEEN 400 AND 499), 0) AS clientErrors,
        coalesce(sum(status >= 500), 0) AS serverErrors
      FROM access_log WHERE ${w.sql}`,
@@ -143,6 +153,8 @@ export function stats(db: Database, f: Filters) {
     services: top("host_id"),
     hosts: top("host"),
     clients: top("client_ip"),
+    // Unknown and not looked up yet are one entry.
+    countries: top("nullif(country, '')"),
     statuses: q<{ status: number; requests: number }>(
       `SELECT status, count(*) AS requests FROM access_log WHERE ${w.sql} GROUP BY status ORDER BY requests DESC LIMIT 8`,
     ).all(w.params),

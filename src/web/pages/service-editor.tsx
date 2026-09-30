@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { ArrowRight, Globe, KeyRound, Loader2, Plus, ShieldCheck, X } from "lucide-react";
+import { ArrowRight, Earth, Globe, KeyRound, Loader2, Plus, ShieldCheck, X } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CountryPicker } from "@/components/country-picker";
 import { DeviceBadge } from "@/components/device-badge";
 import { DevicePicker } from "@/components/device-picker";
 import { ServiceIcon, serviceState } from "@/components/status";
@@ -19,6 +20,8 @@ import {
   type BasicAuthUser,
   type ClientAuth,
   type ClientCa,
+  type CountryDbStatus,
+  type CountryMode,
   type Device,
   type AliasMode,
   type Domain,
@@ -34,9 +37,11 @@ interface EditorProps {
   clientCas: ClientCa[] | null;
   basicAuthUsers: BasicAuthUser[] | null;
   traefik: TraefikStatus | null;
+  countryDb: CountryDbStatus | null;
   onOpenDomains: () => void;
   onOpenClientCas: () => void;
   onOpenUsers: () => void;
+  onOpenCountries: () => void;
   onCancel: () => void;
   onSaved: () => void;
 }
@@ -163,6 +168,8 @@ function ServiceForm(
   );
   const [certHeaders, setCertHeaders] = useState(existing?.clientCertHeaders ?? false);
   const [noIndex, setNoIndex] = useState(existing?.noIndex ?? false);
+  const [countryMode, setCountryMode] = useState<CountryMode>(existing?.countryMode ?? "off");
+  const [countries, setCountries] = useState<string[]>(existing?.countries ?? []);
   const [tab, setTab] = useState<Tab>("domains");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -193,6 +200,8 @@ function ServiceForm(
     if (rows.some((r) => !r.base)) return invalid("domains", "Pick a domain for the hostname and every alias.");
     if (!deviceId) return invalid("target", "Pick the tailnet peer that runs this service.");
     if (!port) return invalid("target", "Enter the port your service is listening on.");
+    if (countryMode !== "off" && !countries.length)
+      return invalid("auth", `Pick the countries to ${countryMode === "allow" ? "let in" : "keep out"}.`);
     if (basicAuth && !userIds.length) return invalid("auth", "Pick at least one user who can sign in.");
     if (clientAuth !== "off" && !caIds.length)
       return invalid("auth", "Pick a CA to verify client certificates against.");
@@ -210,6 +219,8 @@ function ServiceForm(
       clientCaIds: clientAuth === "off" ? [] : caIds,
       clientCertHeaders: clientAuth !== "off" && certHeaders,
       noIndex,
+      countryMode,
+      countries: countryMode === "off" ? [] : countries,
     };
     setSaving(true);
     try {
@@ -265,6 +276,9 @@ function ServiceForm(
   );
 
   const state = existing ? serviceState(existing, props.traefik) : null;
+  const countryDbReady = props.countryDb?.state === "ready";
+  // A service that already has restrictions keeps them editable while the database is (re)loading.
+  const canRestrictCountries = countryDbReady || (existing?.countryMode ?? "off") !== "off";
 
   return (
     <form onSubmit={submit} className="flex min-h-0 flex-col">
@@ -306,8 +320,10 @@ function ServiceForm(
             <TabsTrigger value="domains">Hostnames</TabsTrigger>
             <TabsTrigger value="target">Target</TabsTrigger>
             <TabsTrigger value="auth">
-              Authentication
-              {(basicAuth || clientAuth !== "off") && <span className="size-1.5 rounded-full bg-primary" aria-label="on" />}
+              Access
+              {(basicAuth || clientAuth !== "off" || countryMode !== "off") && (
+                <span className="size-1.5 rounded-full bg-primary" aria-label="on" />
+              )}
             </TabsTrigger>
             <TabsTrigger value="advanced">
               Advanced
@@ -448,6 +464,64 @@ function ServiceForm(
           </TabsContent>
 
           <TabsContent value="auth" className="space-y-5">
+            <Section
+              title="Countries"
+              description="Let visitors in by the country of their IP address. The others get 403 Forbidden before any request reaches the service."
+              action={
+                <Switch
+                  checked={countryMode !== "off"}
+                  onCheckedChange={(on) => setCountryMode(on ? "allow" : "off")}
+                  aria-label="Restrict countries"
+                />
+              }
+            >
+              {countryMode !== "off" &&
+                (!canRestrictCountries ? (
+                  <div className="flex items-center justify-between gap-4 rounded-lg border border-dashed p-4">
+                    <p className="text-sm text-muted-foreground">
+                      {props.countryDb?.state === "loading"
+                        ? "The country database is still loading."
+                        : "The country database isn't loaded yet."}
+                    </p>
+                    <Button type="button" variant="outline" size="sm" onClick={props.onOpenCountries}>
+                      <Earth /> Country database
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <Select value={countryMode} onValueChange={(v) => setCountryMode(v as CountryMode)}>
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="allow">Only let in visitors from these countries</SelectItem>
+                        <SelectItem value="block">Keep out visitors from these countries</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <CountryPicker
+                      available={props.countryDb?.countries ?? []}
+                      value={countries}
+                      onChange={setCountries}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {countryMode === "allow"
+                        ? "Addresses without a country, like private networks, are kept out too."
+                        : "Addresses without a country, like private networks, get through."}{" "}
+                      Traefik asks proxytail about each request, and answers 500 while proxytail is down.
+                    </p>
+                    {!countryDbReady && (
+                      <Alert>
+                        <AlertDescription>
+                          The country database isn't loaded, so Traefik answers 503 to every request.{" "}
+                          <button type="button" className="underline" onClick={props.onOpenCountries}>
+                            Country database
+                          </button>
+                        </AlertDescription>
+                      </Alert>
+                    )}
+                  </div>
+                ))}
+            </Section>
 
             <Section
               title="Basic auth"

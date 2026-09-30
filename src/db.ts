@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import type { CountryMode } from "./countries";
 import type { CertSummary } from "./pki";
 
 export const dataDir = process.env.DATA_DIR ?? join(import.meta.dir, "..", "data");
@@ -39,6 +40,11 @@ if (!hostColumns.includes("alias_modes")) {
 }
 if (!hostColumns.includes("no_index")) {
   db.run("ALTER TABLE proxy_hosts ADD COLUMN no_index INTEGER NOT NULL DEFAULT 0");
+}
+// Country restrictions: none, only the listed countries, or all but them.
+if (!hostColumns.includes("country_mode")) {
+  db.run("ALTER TABLE proxy_hosts ADD COLUMN country_mode TEXT NOT NULL DEFAULT 'off'");
+  db.run("ALTER TABLE proxy_hosts ADD COLUMN countries TEXT NOT NULL DEFAULT '[]'");
 }
 // Custom request headers and framing were removed; only "hide from search engines" stays.
 if (hostColumns.includes("headers")) {
@@ -194,6 +200,10 @@ export interface ProxyHost {
   clientCertHeaders: boolean;
   /** Sends `X-Robots-Tag: noindex, nofollow`, so search engines don't index the service. */
   noIndex: boolean;
+  /** `allow`: only visitors from `countries` get through; `block`: visitors from `countries` don't. */
+  countryMode: CountryMode;
+  /** ISO 3166-1 alpha-2 codes, sorted. Empty while `countryMode` is off. */
+  countries: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -215,6 +225,8 @@ interface ProxyHostRow {
   client_cert_headers: number;
   no_index: number;
   alias_modes: string;
+  country_mode: CountryMode;
+  countries: string;
   created_at: string;
   updated_at: string;
 }
@@ -258,6 +270,8 @@ function toHost(r: ProxyHostRow, links = allLinks(r.id)): ProxyHost {
     clientCaIds: links.cas.get(r.id) ?? [],
     clientCertHeaders: !!r.client_cert_headers,
     noIndex: !!r.no_index,
+    countryMode: r.country_mode,
+    countries: JSON.parse(r.countries),
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -278,6 +292,8 @@ function toParams(h: ProxyHostInput) {
     client_auth: h.clientAuth,
     client_cert_headers: h.clientCertHeaders ? 1 : 0,
     no_index: h.noIndex ? 1 : 0,
+    country_mode: h.countryMode,
+    countries: JSON.stringify(h.countryMode === "off" ? [] : h.countries),
   };
 }
 
@@ -314,9 +330,9 @@ export const hosts = {
     const row = db
       .query<ProxyHostRow, any>(
         `INSERT INTO proxy_hosts (domains, device_id, device_name, target_ip, target_port, scheme, insecure_skip_verify, enabled,
-           basic_auth, client_auth, client_cert_headers, no_index, alias_modes)
+           basic_auth, client_auth, client_cert_headers, no_index, alias_modes, country_mode, countries)
          VALUES ($domains, $device_id, $device_name, $target_ip, $target_port, $scheme, $insecure_skip_verify, $enabled,
-           $basic_auth, $client_auth, $client_cert_headers, $no_index, $alias_modes)
+           $basic_auth, $client_auth, $client_cert_headers, $no_index, $alias_modes, $country_mode, $countries)
          RETURNING *`,
       )
       .get(toParams(h))!;
@@ -330,7 +346,8 @@ export const hosts = {
            target_ip = $target_ip, target_port = $target_port, scheme = $scheme,
            insecure_skip_verify = $insecure_skip_verify, enabled = $enabled, basic_auth = $basic_auth,
            client_auth = $client_auth, client_cert_headers = $client_cert_headers,
-           no_index = $no_index, alias_modes = $alias_modes, updated_at = datetime('now')
+           no_index = $no_index, alias_modes = $alias_modes, country_mode = $country_mode, countries = $countries,
+           updated_at = datetime('now')
          WHERE id = $id RETURNING *`,
       )
       .get({ ...toParams(h), id });
@@ -525,7 +542,8 @@ export type SettingKey =
   | "backend_tag"
   | "rate_limit"
   | "access_log_retention_days"
-  | "access_log_cursor";
+  | "access_log_cursor"
+  | "country_db";
 
 export const settings = {
   get(key: SettingKey): string | undefined {

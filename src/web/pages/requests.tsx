@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Country } from "@/components/country-picker";
 import { PageHeader } from "@/components/page-header";
 import { classColor, RequestTimeline, statusClass, TimelineLegend } from "@/components/request-timeline";
 import { usePoll } from "@/hooks/use-poll";
@@ -19,9 +20,11 @@ import {
   type AccessLogFilters,
   type AccessLogRange,
   type AccessLogStats,
+  type CountryDbStatus,
   type ProxyHost,
   type TopItem,
 } from "@/lib/api";
+import { countryFlag, countryName } from "@/lib/countries";
 import { cn } from "@/lib/utils";
 
 const LIVE_MS = 5000;
@@ -80,6 +83,7 @@ function TopList(props: {
   label: (key: TopItem["key"]) => React.ReactNode;
   onPick: (key: TopItem["key"]) => void;
   mono?: boolean;
+  footer?: React.ReactNode;
 }) {
   const max = Math.max(1, ...(props.items ?? []).map((i) => i.requests));
   return (
@@ -117,16 +121,23 @@ function TopList(props: {
             ))}
           </ul>
         )}
+        {props.footer && <p className="px-2 pt-2 text-xs text-muted-foreground">{props.footer}</p>}
       </CardContent>
     </Card>
   );
 }
 
-export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: string }) {
+export function RequestsPage(props: {
+  hosts: ProxyHost[];
+  initialService?: string;
+  countryDb: CountryDbStatus | null;
+  onOpenCountries: () => void;
+}) {
   const [range, setRange] = useState<AccessLogRange>("24h");
   const [service, setService] = useState(props.initialService ?? "");
   const [status, setStatus] = useState("");
   const [ip, setIp] = useState("");
+  const [country, setCountry] = useState("");
   const [search, setSearch] = useState("");
   const [q, setQ] = useState("");
   const [live, setLive] = useState(true);
@@ -144,8 +155,8 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
   }, [search]);
 
   const filters = useMemo<AccessLogFilters>(
-    () => ({ range, service, status, ip, q }),
-    [range, service, status, ip, q],
+    () => ({ range, service, status, ip, country, q }),
+    [range, service, status, ip, country, q],
   );
 
   const names = useMemo(() => new Map(props.hosts.map((h) => [h.id, h.domains[0]!])), [props.hosts]);
@@ -212,11 +223,12 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
   };
 
   const t = stats?.totals;
-  const filtered = !!(service || status || ip || q);
+  const filtered = !!(service || status || ip || country || q);
   const clear = () => {
     setService("");
     setStatus("");
     setIp("");
+    setCountry("");
     setSearch("");
   };
   const withDate = range === "7d";
@@ -316,6 +328,11 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
             {ip} <X />
           </Button>
         )}
+        {country && (
+          <Button variant="secondary" size="sm" onClick={() => setCountry("")}>
+            <Country code={country === "unknown" ? null : country} /> <X />
+          </Button>
+        )}
         {filtered && (
           <Button variant="ghost" size="sm" onClick={clear}>
             Clear filters
@@ -325,7 +342,11 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
 
       <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
         <Tile label="Requests" value={t ? fmt.format(t.requests) : "–"} />
-        <Tile label="Clients" value={t ? fmt.format(t.clients) : "–"} detail="distinct IPs" />
+        <Tile
+          label="Clients"
+          value={t ? fmt.format(t.clients) : "–"}
+          detail={t?.countries ? `distinct IPs · ${fmt.format(t.countries)} ${t.countries === 1 ? "country" : "countries"}` : "distinct IPs"}
+        />
         <Tile
           label="Client errors"
           value={t ? pct(t.clientErrors, t.requests) : "–"}
@@ -356,7 +377,7 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
         </CardContent>
       </Card>
 
-      <div className="mb-4 grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
+      <div className="mb-4 grid gap-4 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
         <TopList
           title="Services"
           items={stats?.services}
@@ -365,6 +386,26 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
         />
         <TopList title="Hostnames" items={stats?.hosts} label={(k) => k} onPick={(k) => setSearch(String(k))} mono />
         <TopList title="Clients" items={stats?.clients} label={(k) => k} onPick={(k) => setIp(String(k))} mono />
+        <TopList
+          title="Countries"
+          items={stats?.countries}
+          label={(k) => <Country code={k === null ? null : String(k)} />}
+          onPick={(k) => setCountry(k === null ? "unknown" : String(k))}
+          footer={
+            props.countryDb && props.countryDb.state !== "ready" ? (
+              <>
+                No country database yet.{" "}
+                <button className="underline" onClick={props.onOpenCountries}>
+                  Countries
+                </button>
+              </>
+            ) : props.countryDb?.dbip ? (
+              <a href="https://db-ip.com" target="_blank" rel="noreferrer" className="hover:underline">
+                IP Geolocation by DB-IP
+              </a>
+            ) : undefined
+          }
+        />
         <TopList
           title="Status codes"
           items={stats?.statuses.map((s) => ({ key: s.status, requests: s.requests, errors: 0 }))}
@@ -392,7 +433,7 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
                   <TableHead className="w-32 pl-4">Time</TableHead>
                   <TableHead className="w-24">Status</TableHead>
                   <TableHead>Target</TableHead>
-                  <TableHead className="w-48">Client</TableHead>
+                  <TableHead className="w-56">Client</TableHead>
                   <TableHead className="w-32 pr-4 text-right">Response time</TableHead>
                 </TableRow>
               </TableHeader>
@@ -415,13 +456,23 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
                       </p>
                     </TableCell>
                     <TableCell>
-                      <button
-                        className="truncate font-mono text-xs hover:underline"
-                        onClick={() => setIp(e.clientIp)}
-                        title="Show only this client"
-                      >
-                        {e.clientIp}
-                      </button>
+                      <div className="flex min-w-0 items-center gap-2">
+                        <button
+                          className="w-5 shrink-0 text-center text-sm"
+                          onClick={() => setCountry(e.country ?? "unknown")}
+                          title={e.country ? `${countryName(e.country)}: show only this country` : "Unknown country"}
+                          aria-label={e.country ? countryName(e.country) : "Unknown country"}
+                        >
+                          {e.country ? countryFlag(e.country) : <span className="text-muted-foreground/60">·</span>}
+                        </button>
+                        <button
+                          className="truncate font-mono text-xs hover:underline"
+                          onClick={() => setIp(e.clientIp)}
+                          title="Show only this client"
+                        >
+                          {e.clientIp}
+                        </button>
+                      </div>
                     </TableCell>
                     <TableCell className="pr-4 text-right text-xs tabular-nums">{fmtDuration(e.durationMs)}</TableCell>
                   </TableRow>

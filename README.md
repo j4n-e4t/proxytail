@@ -45,7 +45,7 @@ tailscale serve --bg --https=8443 http://127.0.0.1:3000
   point each hostname at the public address, and persist the `traefik-acme` volume so certificates survive restarts.
   Plain HTTP is redirected to HTTPS, and each service is served with a one-year HSTS header so browsers won't fall
   back to HTTP afterwards.
-- **Settings** opens with the state of Tailscale, Traefik, rate limiting and the request log, including the versions
+- **Settings** opens with the state of Tailscale, Traefik, rate limiting, the request log and the country database, including the versions
   of Tailscale, Traefik and Valkey. Each tile opens its section. For Tailscale, the version is the proxy host's
   client: the device whose endpoints include the public address set under **Settings → General**.
 - Peers come from the Tailscale API through an OAuth client. Create one under **Settings → OAuth clients** in the admin
@@ -68,7 +68,9 @@ Then, in the UI:
    service. See [Basic auth](#basic-auth) and [Client certificates (mTLS)](#client-certificates-mtls).
 5. Optionally, **Security → Rate limiting:** limit how many requests each client IP can make. See
    [Rate limiting](#rate-limiting).
-6. **Requests:** watch the traffic your services get, or pick **View requests** in a service's menu.
+6. Optionally, **Countries** in a service's Access tab: only let visitors from some countries in, or keep some out. See
+   [Countries](#countries).
+7. **Requests:** watch the traffic your services get, or pick **View requests** in a service's menu.
 
 Only peers tagged `tag:proxytail-backend` are listed and can be targeted. Change the tag under **Settings → Tailscale** or with
 `TS_BACKEND_TAG`. Define the tag under `tagOwners` in your tailnet policy and apply it to each backend, e.g.
@@ -99,7 +101,7 @@ Users are managed on their own page, **Security → Basic auth users**, and atta
 
 1. **Basic auth users:** add a username and a password (at least 8 characters). Passwords are stored as bcrypt hashes
    and can't be shown again.
-2. **Services:** turn on **Basic auth** in the Authentication tab and check who can sign in.
+2. **Services:** turn on **Basic auth** in the Access tab and check who can sign in.
 
 A user has the same password on every service they're attached to, so changing it there changes it everywhere. Traefik
 strips the credentials before the request reaches the service.
@@ -136,6 +138,43 @@ certificates.
   doesn't route the service at all rather than serving it without the check, and the UI shows it as **Not routed**.
 - A client can't get around the check by sending a different SNI name than the `Host` header, e.g. the name of a
   service without client certificates: Traefik answers `421 Misdirected Request` when their TLS options differ.
+
+## Countries
+
+proxytail knows the country of every client IP, from its own copy of DB-IP's free
+[IP to Country Lite](https://db-ip.com/db/download/ip-to-country-lite) database. Addresses are looked up in memory, so
+they never leave the host, and there is no API or account involved.
+
+- **Downloading:** on its first start, proxytail downloads the database (about 5 MB) into
+  `countries/countries.csv.gz` in its data volume. DB-IP publishes a new edition every month; proxytail checks twice a
+  day whether one is due and fetches it in the background, keeping the old one if that fails. **Settings → Countries**
+  shows the edition, looks up an address, and has **Update now**. Set `COUNTRY_DB_URL` to download a file in the same
+  format from elsewhere, e.g. a mirror: one range per line, as `first IP,last IP,country code`, optionally gzipped.
+- **Requests** shows each request's country, the top countries, and filters by them. The country is looked up when
+  the request is stored; requests stored before the database was there get theirs once it's loaded.
+- **Restricting a service:** turn on **Countries** in the service's Access tab, and either let in only visitors from
+  the countries you pick, or keep visitors from them out. Everyone else gets `403 Forbidden` before the request reaches
+  the service, and before basic auth asks for a password. The restriction applies to the service's hostname and its
+  parallel aliases; redirect aliases only send visitors on to the hostname, where it applies.
+
+How it works: the service gets Traefik's [forwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/)
+middleware, right after rate limiting. For each request, Traefik asks proxytail
+(`/api/traefik/country`, over the Docker network) with the client's address, and proxytail answers from memory. The
+countries are part of the middleware's address, so the check always matches Traefik's configuration. Only
+`X-Forwarded-For` is passed on, which Traefik sets to the address the connection came from: what the client sends in
+it is ignored, and cookies and credentials never reach proxytail.
+
+- **Addresses without a country,** such as private networks and addresses the database doesn't know, are never in the
+  list: an allowlist keeps them out, and a blocklist lets them in. As with rate limiting, if the **Requests** page shows
+  a Docker gateway address (`172.x`) as the client, proxytail can't tell visitors apart: allowlists keep everyone out,
+  and blocklists let everyone in.
+- **It fails closed:** while proxytail is down, e.g. during an update, Traefik answers `500` to requests for services
+  with a country restriction; other services aren't affected. Without a loaded database proxytail answers `503`, and a
+  restriction can't be turned on until one is loaded.
+- Traefik reaches proxytail at `http://app:3000`, or `http://host.docker.internal:$PORT` in development. Set
+  `TRAEFIK_APP_URL` if yours differs.
+- Country data is only as good as the database, and a VPN or proxy moves a visitor anywhere. Treat it as a filter
+  against unwanted traffic, not as authentication.
 
 ## Hiding from search engines
 
@@ -226,12 +265,12 @@ The **Requests** page shows what Traefik served over the last hour, 24 hours or 
 
 - the number of requests and distinct clients, the share of 4xx and 5xx responses, and response times (95th
   percentile and median);
-- requests over time, stacked by status class, and the top services, hostnames, clients and status codes. Click one to
-  filter the page by it;
-- the requests themselves, newest first: time, status, target (hostname and service), client IP and response time,
-  with a search across hostnames and client IPs.
+- requests over time, stacked by status class, and the top services, hostnames, clients, countries and status codes.
+  Click one to filter the page by it;
+- the requests themselves, newest first: time, status, target (hostname and service), client IP with its country, and
+  response time, with a search across hostnames and client IPs.
 
-Each request is stored with those five things only. Paths, query strings, methods and headers aren't stored, and
+Each request is stored with those things only. Paths, query strings, methods and headers aren't stored, and
 Traefik doesn't write them to its access log in the first place.
 
 **Live** refreshes the list every 5 seconds, and the figures every 5 seconds to a minute depending on the period. The
@@ -281,8 +320,11 @@ at the network layer. That's a deliberate trade-off for personal and homelab set
 - **Traefik's API is unauthenticated** (routers, services, basic auth hashes), so it's only reachable on the Docker
   network, like `/api/traefik/config`.
 - **Valkey has no password** and is only reachable on the Docker network. It only holds rate limit counters.
-- **The request log holds client IPs,** which are personal data, with the hostname, status and response time of each
-  request. It stays in proxytail's database for the retention you set, and anyone who can open the UI can read it.
+- **The request log holds client IPs,** which are personal data, with their country and the hostname, status and
+  response time of each request. It stays in proxytail's database for the retention you set, and anyone who can open the UI can read it.
+
+proxytail downloads the country database from `download.db-ip.com` (or `COUNTRY_DB_URL`), and never sends it
+anything about your visitors.
 
 Traefik can reach the internet (it needs to for Let's Encrypt), and it holds the certificates and basic auth hashes it
 serves. Client CAs are stored as certificates only, without keys, so neither proxytail nor Traefik can mint client
@@ -330,3 +372,6 @@ SSO/forward-auth for proxied services.
 ## Credits
 
 The Tailscale and Traefik icons are from [selfh.st/icons](https://github.com/selfhst/icons) (CC BY 4.0).
+
+[IP Geolocation by DB-IP](https://db-ip.com): proxytail downloads DB-IP's IP to Country Lite database, which is
+licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).

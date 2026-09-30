@@ -3,6 +3,7 @@ import {
   Activity,
   Check,
   Copy,
+  Earth,
   ExternalLink,
   Gauge,
   Globe,
@@ -20,11 +21,20 @@ import { TailscaleIcon, TraefikIcon } from "@/components/brand-icons";
 import { PageHeader } from "@/components/page-header";
 import { ToneBadge } from "@/components/status";
 import { usePoll } from "@/hooks/use-poll";
-import { api, type AccessLogStatus, type Device, type RateLimitView, type Settings, type TraefikStatus } from "@/lib/api";
+import {
+  api,
+  type AccessLogStatus,
+  type CountryDbStatus,
+  type Device,
+  type RateLimitView,
+  type Settings,
+  type TraefikStatus,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { AccessLogCard } from "@/pages/access-log-settings";
+import { CountryDbCard, countryDbHealth } from "@/pages/country-settings";
 
-export type SettingsSection = "general" | "tailscale" | "traefik" | "request-log";
+export type SettingsSection = "general" | "tailscale" | "traefik" | "request-log" | "countries";
 
 type Tone = "success" | "warning" | "danger" | "muted";
 
@@ -432,6 +442,7 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<
   { id: "tailscale", label: "Tailscale", icon: TailscaleIcon },
   { id: "traefik", label: "Traefik", icon: TraefikIcon },
   { id: "request-log", label: "Request log", icon: Activity },
+  { id: "countries", label: "Countries", icon: Earth },
 ];
 
 /** The sidebar picks the section; the tiles above it show the state of everything proxytail drives. */
@@ -441,6 +452,8 @@ export function SettingsPage(props: {
   onOpenRateLimiting: () => void;
   settings: Settings;
   traefik: TraefikStatus | null;
+  countryDb: CountryDbStatus | null;
+  onCountryDbChanged: (s: CountryDbStatus) => void;
   devices: Device[] | null;
   devicesError: string | null;
   onSaved: (s: Settings) => void;
@@ -455,6 +468,7 @@ export function SettingsPage(props: {
     tailscale: tailscaleHealth(props.settings, props.devices, props.devicesError),
     traefik: traefikHealth(props.traefik),
     "request-log": requestLogHealth(accessLog.data),
+    countries: countryDbHealth(props.countryDb),
   };
 
   const section = props.section;
@@ -476,7 +490,7 @@ export function SettingsPage(props: {
     <>
       <PageHeader title="Settings" description="The systems proxytail drives, and how it handles your traffic." />
 
-      <div className="mb-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5">
         {tile("tailscale")}
         {tile("traefik")}
         <StatusTile
@@ -487,6 +501,7 @@ export function SettingsPage(props: {
           onClick={props.onOpenRateLimiting}
         />
         {tile("request-log")}
+        {tile("countries")}
       </div>
 
       <section aria-label={current.label} className="grid max-w-4xl grid-cols-1 gap-6">
@@ -501,6 +516,7 @@ export function SettingsPage(props: {
         )}
         {section === "traefik" && <TraefikCard traefik={props.traefik} health={health.traefik} />}
         {section === "request-log" && <AccessLogCard onChanged={accessLog.setData} />}
+        {section === "countries" && <CountryDbCard onChanged={props.onCountryDbChanged} />}
       </section>
     </>
   );

@@ -1,5 +1,6 @@
 import {
   CircleX,
+  Earth,
   Globe,
   Hourglass,
   KeyRound,
@@ -14,6 +15,7 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { CertInfo, ProxyHost, TraefikStatus } from "@/lib/api";
+import { countryName } from "@/lib/countries";
 import { cn } from "@/lib/utils";
 
 export function StatusDot({ status, className }: { status: "online" | "offline" | "unknown"; className?: string }) {
@@ -228,18 +230,32 @@ export function CertCell({ host, traefik }: { host: ProxyHost; traefik: TraefikS
   }
 }
 
+/** Who may reach a service, in words: its country restriction. */
+function countriesTip(host: ProxyHost) {
+  if (host.countryMode === "off") return null;
+  const names = host.countries.map(countryName).join(", ");
+  return host.countryMode === "allow" ? `Only visitors from ${names}` : `No visitors from ${names}`;
+}
+
 export function AccessCell({ host }: { host: ProxyHost }) {
   const names = host.basicAuthUsers.map((u) => u.username);
+  const countries = countriesTip(host);
+  const tip = (...parts: (string | null)[]) => parts.filter(Boolean).join("; ");
   if (host.clientAuth !== "off") {
     const cas = `${host.clientCaIds.length} ${host.clientCaIds.length === 1 ? "CA" : "CAs"}`;
     return (
       <Cell
         icon={ShieldCheck}
         label="Client cert"
-        tip={`${host.clientAuth === "require" ? "Required" : "Optional"}, verified against ${cas}${host.basicAuth ? `; basic auth for ${names.join(", ")}` : ""}`}
+        tip={tip(
+          `${host.clientAuth === "require" ? "Required" : "Optional"}, verified against ${cas}`,
+          host.basicAuth ? `basic auth for ${names.join(", ")}` : null,
+          countries,
+        )}
       />
     );
   }
-  if (!host.basicAuth) return <Cell label="Public" t="muted" />;
-  return <Cell icon={KeyRound} label="Basic auth" tip={names.join(", ")} />;
+  if (host.basicAuth) return <Cell icon={KeyRound} label="Basic auth" tip={tip(names.join(", "), countries)} />;
+  if (countries) return <Cell icon={Earth} label="Countries" tip={countries} />;
+  return <Cell label="Public" t="muted" />;
 }

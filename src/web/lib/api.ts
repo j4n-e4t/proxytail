@@ -6,6 +6,9 @@ export type ClientAuth = "off" | "require" | "optional";
  */
 export type AliasMode = "redirect" | "parallel";
 
+/** `allow`: only visitors from the listed countries get through; `block`: visitors from them don't. */
+export type CountryMode = "off" | "allow" | "block";
+
 export interface Alias {
   hostname: string;
   mode: AliasMode;
@@ -32,13 +35,16 @@ export interface ProxyHost {
   clientCertHeaders: boolean;
   /** Sends `X-Robots-Tag: noindex, nofollow`. */
   noIndex: boolean;
+  countryMode: CountryMode;
+  /** ISO 3166-1 alpha-2 codes. */
+  countries: string[];
   createdAt: string;
   updatedAt: string;
 }
 
 export type ProxyHostDraft = Pick<
   ProxyHost,
-    | "domains"
+  | "domains"
   | "aliases"
   | "deviceId"
   | "targetPort"
@@ -51,6 +57,8 @@ export type ProxyHostDraft = Pick<
   | "clientCaIds"
   | "clientCertHeaders"
   | "noIndex"
+  | "countryMode"
+  | "countries"
 >;
 
 export interface BasicAuthUser {
@@ -189,6 +197,25 @@ export interface ServiceTraffic {
   lastRequest: string | null;
 }
 
+export interface CountryDbStatus {
+  state: "ready" | "loading" | "missing" | "error";
+  downloading: boolean;
+  /** The last failed download or load, until one succeeds. */
+  error?: string;
+  /** "DB-IP IP to Country Lite", or COUNTRY_DB_URL. */
+  source: string;
+  /** DB-IP's data, which asks for attribution. */
+  dbip: boolean;
+  /** DB-IP's monthly edition, e.g. 2026-09. */
+  edition: string | null;
+  downloadedAt: string | null;
+  lastCheck: string | null;
+  path: string;
+  ranges: number;
+  /** Every country code the database knows. */
+  countries: string[];
+}
+
 export type AccessLogRange = "1h" | "24h" | "7d";
 
 export interface AccessLogStatus {
@@ -211,6 +238,8 @@ export interface AccessLogFilters {
   /** "2xx" … "5xx", or an exact code. */
   status?: string;
   ip?: string;
+  /** A country code, or "unknown". */
+  country?: string;
   q?: string;
 }
 
@@ -225,6 +254,8 @@ export interface AccessLogEntry {
   serviceId: number | null;
   status: number;
   durationMs: number;
+  /** The client's country; null when unknown. */
+  country: string | null;
 }
 
 export type StatusClass = "2xx" | "3xx" | "4xx" | "5xx";
@@ -242,6 +273,7 @@ export interface AccessLogStats {
   totals: {
     requests: number;
     clients: number;
+    countries: number;
     clientErrors: number;
     serverErrors: number;
     p50Ms: number | null;
@@ -251,6 +283,8 @@ export interface AccessLogStats {
   services: TopItem[];
   hosts: TopItem[];
   clients: TopItem[];
+  /** Keyed by country code; null for unknown. */
+  countries: TopItem[];
   statuses: { status: number; requests: number }[];
 }
 
@@ -308,6 +342,10 @@ export const api = {
   serviceTraffic: () =>
     request<{ hourStart: string; services: Record<number, ServiceTraffic> }>("GET", "/api/access-log/services"),
   accessLogStats: (f: AccessLogFilters) => request<AccessLogStats>("GET", `/api/access-log/stats?${query(f)}`),
+  countryDb: () => request<CountryDbStatus>("GET", "/api/countries"),
+  updateCountryDb: () => request<CountryDbStatus>("POST", "/api/countries/update"),
+  lookupCountry: (ip: string) =>
+    request<{ ip: string; country: string | null }>("GET", `/api/countries/lookup?ip=${encodeURIComponent(ip)}`),
   rateLimit: () => request<RateLimitView>("GET", "/api/rate-limit"),
   saveRateLimit: (c: Partial<RateLimitConfig>) => request<RateLimitView>("PUT", "/api/rate-limit", c),
 };

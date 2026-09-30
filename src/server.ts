@@ -1,4 +1,5 @@
 import { SQLiteError } from "bun:sqlite";
+import { isIP } from "node:net";
 import index from "./web/index.html";
 import { checkBrowserOrigin } from "./guard";
 import {
@@ -25,6 +26,15 @@ import {
   type ProxyHost,
   type ProxyHostInput,
 } from "./db";
+import {
+  checkCountry,
+  countriesReady,
+  countryDbStatus,
+  countryOf,
+  isCountryCode,
+  updateCountries,
+  type CountryMode,
+} from "./countries";
 import { checkDomain, detectPublicIp, publicAddress, requiredRecord } from "./dns";
 import { faviconFor } from "./favicons";
 import { parseCaBundle, PkiError } from "./pki";
@@ -183,6 +193,21 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
     for (const id of clientCaIds) if (!clientCas.get(id)) throw new HttpError(400, `Client CA ${id} does not exist`);
   }
 
+  const countryMode = (raw.countryMode ?? "off") as CountryMode;
+  if (!["off", "allow", "block"].includes(countryMode)) throw new HttpError(400, "Countries must be off, allow or block");
+  const countries =
+    countryMode === "off" || !Array.isArray(raw.countries)
+      ? []
+      : [...new Set<string>(raw.countries.map((c: unknown) => String(c).trim().toUpperCase()))].sort();
+  if (countryMode !== "off") {
+    if (!countries.length)
+      throw new HttpError(400, `Pick at least one country to ${countryMode === "allow" ? "let in" : "block"}`);
+    for (const c of countries) if (!isCountryCode(c)) throw new HttpError(400, `${c} is not a country code`);
+    // Traefik would answer 503 to every request until the database is there.
+    if (!countriesReady() && (existing?.countryMode ?? "off") === "off")
+      throw new HttpError(400, "The country database isn't loaded yet. See Settings → Countries.");
+  }
+
   return {
     domains,
     aliases,
@@ -199,6 +224,8 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
     clientCaIds,
     clientCertHeaders: clientAuth !== "off" && !!raw.clientCertHeaders,
     noIndex: !!raw.noIndex,
+    countryMode,
+    countries,
   };
 }
 
@@ -343,7 +370,7 @@ function accessLogFilters(params: URLSearchParams): Filters {
   if (!Object.hasOwn(ACCESS_LOG_RANGES, range))
     throw new HttpError(400, `Range must be one of ${Object.keys(ACCESS_LOG_RANGES).join(", ")}`);
   const get = (key: string) => params.get(key)?.trim() || undefined;
-  return { range, service: get("service"), status: get("status"), ip: get("ip"), q: get("q") };
+  return { range, service: get("service"), status: get("status"), ip: get("ip"), country: get("country"), q: get("q") };
 }
 
 const port = Number(process.env.PORT ?? 3000);
@@ -630,11 +657,28 @@ const server = Bun.serve({
       GET: handle(async (req) => json(await accessLogStats(accessLogFilters(new URL(req.url).searchParams)))),
     },
 
+    "/api/countries": {
+      GET: handle(async () => json(await countryDbStatus())),
+    },
+    "/api/countries/update": {
+      POST: handle(async () => json(await updateCountries())),
+    },
+    "/api/countries/lookup": {
+      GET: handle((req) => {
+        const ip = new URL(req.url).searchParams.get("ip")?.trim() ?? "";
+        if (!isIP(ip)) throw new HttpError(400, `${ip || "(empty)"} is not an IP address`);
+        if (!countriesReady()) throw new HttpError(503, "The country database isn't loaded yet");
+        return json({ ip, country: countryOf(ip) || null });
+      }),
+    },
+
     "/api/health": { GET: () => json({ ok: true }) },
 
     // Polled by Traefik's HTTP provider over the Docker network.
     "/api/traefik/config": { GET: handle(() => json(buildConfig())) },
     "/api/traefik/status": { GET: handle(async () => json(await traefikStatus())) },
+    // Traefik's forwardAuth check for services with country restrictions, on every request to them.
+    "/api/traefik/country": { GET: handle(checkCountry) },
   },
   development: process.env.NODE_ENV !== "production" && { hmr: true, console: true },
 });

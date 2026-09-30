@@ -1,6 +1,7 @@
 import { stat, truncate } from "node:fs/promises";
 import { join } from "node:path";
 import { listEntries, RANGES, serviceTraffic, stats, where, type Filters, type Range } from "./accesslog-query";
+import { countriesReady, countryOf, onCountriesLoaded } from "./countries";
 import { dataDir, db, dbPath, settings } from "./db";
 
 /**
@@ -20,7 +21,9 @@ export const DEFAULT_RETENTION_DAYS = 7;
 
 /**
  * Each request is stored with only its time, client IP, target (the hostname, and the service it matched), status and
- * response time. Traefik is configured to write nothing else to its access log either (see docker-compose.yml).
+ * response time. Traefik is configured to write nothing else to its access log either (see docker-compose.yml). The
+ * client's country is looked up in proxytail's own database (countries.ts): NULL until one is loaded, "" for addresses
+ * without a country.
  */
 const SCHEMA = `(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,7 +32,8 @@ const SCHEMA = `(
   host TEXT NOT NULL,
   host_id INTEGER,
   status INTEGER NOT NULL,
-  duration_ms REAL NOT NULL
+  duration_ms REAL NOT NULL,
+  country TEXT
 )`;
 db.run(`CREATE TABLE IF NOT EXISTS access_log ${SCHEMA}`);
 
@@ -49,6 +53,8 @@ if (logColumns.includes("path")) {
   db.run("VACUUM");
   console.log("Reduced the request log to client IP, target, status, response time and time");
 }
+if (!db.query<{ name: string }, []>("PRAGMA table_info(access_log)").all().some((c) => c.name === "country"))
+  db.run("ALTER TABLE access_log ADD COLUMN country TEXT");
 db.run("CREATE INDEX IF NOT EXISTS access_log_time ON access_log (time)");
 db.run("CREATE INDEX IF NOT EXISTS access_log_host_time ON access_log (host_id, time)");
 
@@ -66,8 +72,8 @@ interface TraefikEntry {
 const ROUTER_RE = /^proxytail-host-(\d+)(?:-redirect)?@/;
 
 const insert = db.query(
-  `INSERT INTO access_log (time, client_ip, host, host_id, status, duration_ms)
-   VALUES ($time, $client_ip, $host, $host_id, $status, $duration_ms)`,
+  `INSERT INTO access_log (time, client_ip, host, host_id, status, duration_ms, country)
+   VALUES ($time, $client_ip, $host, $host_id, $status, $duration_ms, $country)`,
 );
 
 function toRow(e: TraefikEntry) {
@@ -75,13 +81,15 @@ function toRow(e: TraefikEntry) {
   const time = Date.parse(e.StartUTC);
   if (Number.isNaN(time)) return null;
   const hostId = e.RouterName?.match(ROUTER_RE)?.[1];
+  const clientIp = e.ClientHost ?? "";
   return {
     time,
-    client_ip: e.ClientHost ?? "",
+    client_ip: clientIp,
     host: e.RequestHost ?? "",
     host_id: hostId ? Number(hostId) : null,
     status: e.DownstreamStatus,
     duration_ms: (e.Duration ?? 0) / 1e6,
+    country: countryOf(clientIp),
   };
 }
 
@@ -199,8 +207,31 @@ function prune() {
   if (max) db.query("DELETE FROM access_log WHERE id <= ?").run(max - MAX_ROWS);
 }
 
+/**
+ * Looks up the countries of requests stored while no country database was loaded, a batch at a time so the server
+ * keeps answering meanwhile.
+ */
+const missingCountry = db.query<{ id: number; client_ip: string }, [number]>(
+  "SELECT id, client_ip FROM access_log WHERE id > ? AND country IS NULL ORDER BY id LIMIT 5000",
+);
+const setCountry = db.query("UPDATE access_log SET country = ? WHERE id = ?");
+const fillBatch = db.transaction((rows: { id: number; client_ip: string }[]) => {
+  for (const r of rows) setCountry.run(countryOf(r.client_ip), r.id);
+});
+let filling = false;
+
+function fillCountries(after = 0) {
+  if (filling && !after) return;
+  const rows = countriesReady() ? missingCountry.all(after) : [];
+  filling = rows.length > 0;
+  if (!filling) return;
+  fillBatch(rows);
+  setTimeout(() => fillCountries(rows.at(-1)!.id), 20).unref();
+}
+
 follow();
 prune();
+onCountriesLoaded(() => fillCountries());
 setInterval(prune, PRUNE_MS).unref();
 
 export function accessLogStatus() {
