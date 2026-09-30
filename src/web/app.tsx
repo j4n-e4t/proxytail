@@ -2,17 +2,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
+  ChevronDown,
+  Gauge,
   Globe,
   Monitor,
   MonitorSmartphone,
   Moon,
   RefreshCw,
-  Settings as SettingsIcon,
+  ScrollText,
   ShieldCheck,
+  SlidersHorizontal,
   Sun,
   Waypoints,
-  type LucideIcon,
 } from "lucide-react";
+import { TailscaleIcon, TraefikIcon } from "@/components/brand-icons";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -63,24 +66,92 @@ function useRoute() {
   return [route, (hash: string) => (location.hash = hash)] as const;
 }
 
-function NavItem(props: { icon: LucideIcon; label: string; active: boolean; count?: number; onClick: () => void }) {
-  const Icon = props.icon;
+type NavIcon = React.ComponentType<{ className?: string }>;
+
+/** A sidebar entry: a page, or a section of the Settings page. */
+interface NavEntry {
+  /** `page` or `settings/<section>`: also the hash it opens. */
+  target: string;
+  label: string;
+  icon: NavIcon;
+  count?: number;
+}
+
+interface NavGroupDef {
+  id: string;
+  label: string;
+  items: NavEntry[];
+}
+
+const COLLAPSED_KEY = "proxytail.sidebar.collapsed";
+
+function loadCollapsed(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "[]");
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+function NavItem(props: { item: NavEntry; active: boolean; onClick: () => void }) {
+  const { icon: Icon, label, count } = props.item;
   return (
     <button
       onClick={props.onClick}
+      aria-current={props.active ? "page" : undefined}
       className={cn(
-        "flex h-9 w-full items-center gap-3 rounded-md px-3 text-sm font-medium transition-colors",
+        "flex h-8 w-full items-center gap-3 rounded-md px-3 text-sm font-medium transition-colors",
         props.active
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
           : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
       )}
     >
-      <Icon className={cn("size-4", props.active && "text-primary")} />
-      {props.label}
-      {props.count !== undefined && (
-        <span className="ml-auto text-xs text-muted-foreground tabular-nums">{props.count}</span>
-      )}
+      <Icon className={cn("size-4 shrink-0", props.active && "text-primary")} />
+      {label}
+      {count !== undefined && <span className="ml-auto text-xs text-muted-foreground tabular-nums">{count}</span>}
     </button>
+  );
+}
+
+/** A titled group of entries that folds away from its header. */
+function NavGroup(props: {
+  group: NavGroupDef;
+  open: boolean;
+  active: string;
+  onToggle: () => void;
+  onNavigate: (target: string) => void;
+}) {
+  const { group, open } = props;
+  return (
+    <div>
+      <button
+        onClick={props.onToggle}
+        aria-expanded={open}
+        className="flex h-7 w-full items-center gap-2 rounded-md px-3 text-xs font-medium text-muted-foreground/80 transition-colors hover:text-foreground"
+      >
+        {group.label}
+        <ChevronDown className={cn("ml-auto size-3.5 transition-transform", !open && "-rotate-90")} />
+      </button>
+      {/* grid-rows animates the height without measuring it. */}
+      <div
+        className={cn(
+          "grid transition-[grid-template-rows] duration-200",
+          open ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+        )}
+      >
+        <div className="space-y-0.5 overflow-hidden pt-0.5" inert={!open}>
+          {group.items.map((item) => (
+            <NavItem
+              key={item.target}
+              item={item}
+              active={props.active === item.target}
+              onClick={() => props.onNavigate(item.target)}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -136,6 +207,65 @@ function Console() {
     30_000,
   );
 
+  const navGroups: NavGroupDef[] = [
+    {
+      id: "proxy",
+      label: "Proxy",
+      items: [
+        { target: "services", label: "Services", icon: Waypoints, count: hosts.data?.length },
+        { target: "domains", label: "Domains", icon: Globe, count: domains.data?.length },
+        { target: "peers", label: "Peers", icon: MonitorSmartphone, count: devices.data?.length },
+      ],
+    },
+    {
+      id: "security",
+      label: "Security",
+      items: [
+        { target: "client-cas", label: "Client CAs", icon: ShieldCheck, count: clientCas.data?.length },
+        { target: "settings/rate-limiting", label: "Rate limiting", icon: Gauge },
+      ],
+    },
+    {
+      id: "monitoring",
+      label: "Monitoring",
+      items: [
+        { target: "requests", label: "Requests", icon: Activity },
+        { target: "settings/request-log", label: "Request log", icon: ScrollText },
+      ],
+    },
+    {
+      id: "settings",
+      label: "Settings",
+      items: [
+        { target: "settings", label: "General", icon: SlidersHorizontal },
+        { target: "settings/tailscale", label: "Tailscale", icon: TailscaleIcon },
+        { target: "settings/traefik", label: "Traefik", icon: TraefikIcon },
+      ],
+    },
+  ];
+  // The entry for the current page: Settings sections have their own, General is plain `settings`.
+  const activeTarget =
+    page === "settings" ? (isSettingsSection(route.sub) && route.sub !== "general" ? `settings/${route.sub}` : "settings") : page;
+
+  const [collapsed, setCollapsed] = useState<string[]>(loadCollapsed);
+  const toggleGroup = (id: string) =>
+    setCollapsed((c) => {
+      const next = c.includes(id) ? c.filter((x) => x !== id) : [...c, id];
+      try {
+        localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
+      } catch {
+        // Storage unavailable (e.g. private mode): the choice lasts until reload.
+      }
+      return next;
+    });
+  // Navigating into a collapsed group (e.g. from a link on a page) opens it, so the current page is always visible.
+  const activeGroup = navGroups.find((g) => g.items.some((i) => i.target === activeTarget))?.id;
+  useEffect(() => {
+    if (activeGroup && collapsed.includes(activeGroup)) toggleGroup(activeGroup);
+    // Only when the page changes, so collapsing the current group by hand sticks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTarget]);
+
   const refreshHosts = () => {
     hosts.reload();
     domains.reload();
@@ -156,47 +286,17 @@ function Console() {
       <aside className="sticky top-0 flex h-screen w-60 shrink-0 flex-col border-r bg-sidebar">
         <Brand />
 
-        <nav className="flex-1 space-y-1 px-3 py-2">
-          <NavItem
-            icon={Waypoints}
-            label="Services"
-            count={hosts.data?.length}
-            active={page === "services"}
-            onClick={() => setPage("services")}
-          />
-          <NavItem
-            icon={Activity}
-            label="Requests"
-            active={page === "requests"}
-            onClick={() => setPage("requests")}
-          />
-          <NavItem
-            icon={Globe}
-            label="Domains"
-            count={domains.data?.length}
-            active={page === "domains"}
-            onClick={() => setPage("domains")}
-          />
-          <NavItem
-            icon={ShieldCheck}
-            label="Client CAs"
-            count={clientCas.data?.length}
-            active={page === "client-cas"}
-            onClick={() => setPage("client-cas")}
-          />
-          <NavItem
-            icon={MonitorSmartphone}
-            label="Peers"
-            count={devices.data?.length}
-            active={page === "peers"}
-            onClick={() => setPage("peers")}
-          />
-          <NavItem
-            icon={SettingsIcon}
-            label="Settings"
-            active={page === "settings"}
-            onClick={() => setPage("settings")}
-          />
+        <nav aria-label="Main" className="flex-1 space-y-3 overflow-y-auto px-3 py-2">
+          {navGroups.map((g) => (
+            <NavGroup
+              key={g.id}
+              group={g}
+              open={!collapsed.includes(g.id)}
+              active={activeTarget}
+              onToggle={() => toggleGroup(g.id)}
+              onNavigate={navigate}
+            />
+          ))}
         </nav>
 
         <div className="border-t p-3">
