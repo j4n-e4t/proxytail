@@ -185,7 +185,7 @@ It stops before touching the running stack if anything is missing, and then:
    `docker compose pull` can't swap `main`'s image back in (`docker compose pull` then fails for the app; update it
    with `git pull && docker compose build app && docker compose up -d`);
 4. starts the new stack. `volume-init` hands the certificates to Traefik's unprivileged user;
-5. waits for both containers to be healthy, and prints the state of Traefik's routers.
+5. waits for the app, Traefik and Valkey to be healthy, and prints the state of Traefik's routers.
 
 Services are down for the few seconds the containers are recreated. Afterwards, clients that send no hostname (SNI)
 get no TLS connection (see [Hardening](#hardening)). Rate limiting stays off until you turn it on (see
@@ -195,6 +195,43 @@ To go back, run `scripts/migrate-from-main.sh rollback` **before** leaving the b
 certificates back to root, which `main`'s Traefik runs as, and restores `.env`. Then run
 `git checkout main && docker compose up -d --remove-orphans`. If the data itself needs restoring, the backup holds
 `data/` and `letsencrypt/`, the contents of the `proxytail_proxytail-data` and `proxytail_traefik-acme` volumes.
+
+## Migrating from an earlier commit with CrowdSec
+
+Stacks started from this branch before CrowdSec was replaced by rate limiting (up to `a77c83c`) can't simply be
+pulled and restarted. Their `.env` may add `docker-compose.crowdsec.yml`, which no longer exists, so every
+`docker compose` command fails, and may pin Traefik to a Docker Hardened Image. And `docker compose pull` would fetch
+`main`'s app from GHCR. `scripts/migrate-from-crowdsec.sh` handles all of it:
+
+```sh
+cd /path/to/proxytail            # the checkout the stack was started from, with its .env
+git pull
+scripts/migrate-from-crowdsec.sh
+```
+
+It stops before touching the running stack if anything is missing, and then:
+
+1. lists the CrowdSec volumes with their sizes, and the size of Traefik's access log;
+2. saves `.env` as `.env.pre-crowdsec-removal` and cleans it up, printing the diff: it removes
+   `docker-compose.crowdsec.yml` from `COMPOSE_FILE` (keeping any other files) and every `CROWDSEC_*` setting, drops a
+   `TRAEFIK_IMAGE` that pins a Docker Hardened Image or Traefik before 3.7, and sets `PROXYTAIL_IMAGE=proxytail:crowdsec`;
+3. builds the app and pulls Traefik and Valkey while the old stack keeps serving; if that fails, `.env` is put back;
+4. stops the stack, CrowdSec and its log rotation included, and backs up the data, the certificates and the CrowdSec
+   volumes to `backups/proxytail-<time>.tar.gz`;
+5. starts the new stack, waits for it to be healthy, and prints the state of Traefik's routers;
+6. deletes the CrowdSec volumes once no container uses them, after asking. `--yes` deletes them without asking,
+   `--keep-volumes` keeps them; without a terminal to ask on, they're kept.
+
+The database is upgraded when the app starts: CrowdSec's settings are removed, and basic auth users become shared
+users (see [Basic auth](#basic-auth)). Traefik's existing access log, which CrowdSec read, is imported into the Requests
+page, keeping only time, client IP, hostname, status and response time, and then emptied.
+
+To go back, run `scripts/migrate-from-crowdsec.sh rollback` **before** checking out the earlier commit. It stops the
+stack, restores the CrowdSec volumes from the backup if they were deleted, and restores `.env`. Then run e.g.
+`git checkout a77c83c && docker compose up -d --remove-orphans` (with `docker login dhi.io` first if its Traefik image
+is a Docker Hardened Image that isn't on the host). The earlier commit runs on the upgraded database, with the users
+from before the migration. Its CrowdSec settings are gone: proxytail registers with CrowdSec again by itself, but turn
+**Block banned IPs** back on and re-enter the IPs to never block under **Settings → CrowdSec**.
 
 ## Rate limiting
 
