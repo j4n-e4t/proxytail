@@ -2,7 +2,8 @@ import type { Database } from "bun:sqlite";
 
 /**
  * Queries behind the Requests page. They take the database as an argument: the stats run in a worker
- * (accesslog-worker.ts) with its own read-only connection, so a week of requests doesn't block the server.
+ * (accesslog-worker.ts) with its own read-only connection, so a week of requests doesn't block the server. So does the
+ * count behind the request list's page numbers.
  */
 export const RANGES = { "1h": 3_600_000, "24h": 86_400_000, "7d": 7 * 86_400_000 } as const;
 export type Range = keyof typeof RANGES;
@@ -76,17 +77,27 @@ const toEntry = (r: Row) => ({
   durationMs: r.duration_ms,
 });
 
-/** The newest requests matching the filters, before the `before` id when paging. */
-export function listEntries(db: Database, f: Filters, before: number | null, limit: number) {
+/** The filters, limited to requests up to the `upTo` id: pages counted from it don't shift as new requests arrive. */
+function whereUpTo(f: Filters, upTo: number) {
   const w = where(f);
-  if (before) {
-    w.sql += " AND id < $before";
-    w.params.before = before;
-  }
-  const rows = db
-    .query<Row, any>(`SELECT * FROM access_log WHERE ${w.sql} ORDER BY id DESC LIMIT ${limit + 1}`)
-    .all(w.params);
-  return { entries: rows.slice(0, limit).map(toEntry), hasMore: rows.length > limit };
+  w.sql += " AND id <= $upTo";
+  w.params.upTo = upTo;
+  return w;
+}
+
+/** A page of the requests matching the filters, newest first. */
+export function listEntries(db: Database, f: Filters, upTo: number, offset: number, limit: number) {
+  const w = whereUpTo(f, upTo);
+  return db
+    .query<Row, any>(`SELECT * FROM access_log WHERE ${w.sql} ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`)
+    .all(w.params)
+    .map(toEntry);
+}
+
+/** How many requests match the filters, for the page count. */
+export function countEntries(db: Database, f: Filters, upTo: number) {
+  const w = whereUpTo(f, upTo);
+  return db.query<{ n: number }, any>(`SELECT count(*) AS n FROM access_log WHERE ${w.sql}`).get(w.params)!.n;
 }
 
 const BINS_PER_E = 20;

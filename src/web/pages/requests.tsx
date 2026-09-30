@@ -1,5 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { FileWarning, Loader2, RefreshCw, Search, Settings2, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  FileWarning,
+  RefreshCw,
+  Search,
+  Settings2,
+  X,
+} from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -34,6 +44,17 @@ const RANGES: { value: AccessLogRange; label: string }[] = [
   { value: "7d", label: "7 days" },
 ];
 const STATUSES = ["2xx", "3xx", "4xx", "5xx", "429"];
+const PAGE_SIZES = [25, 50, 100, 200];
+const PAGE_SIZE_KEY = "proxytail.requests.pageSize";
+
+function loadPageSize() {
+  try {
+    const v = Number(localStorage.getItem(PAGE_SIZE_KEY));
+    return PAGE_SIZES.includes(v) ? v : 50;
+  } catch {
+    return 50;
+  }
+}
 
 const fmt = new Intl.NumberFormat();
 
@@ -123,6 +144,71 @@ function TopList(props: {
   );
 }
 
+function Pagination(props: {
+  page: number;
+  pageCount: number;
+  pageSize: number;
+  total: number;
+  /** Live updates are on but only show on page 1. */
+  paused: boolean;
+  onPage: (page: number) => void;
+  onPageSize: (size: number) => void;
+}) {
+  const { page, pageCount, pageSize, total } = props;
+  const first = (page - 1) * pageSize + 1;
+  const last = Math.min(page * pageSize, total);
+  const nav = (label: string, to: number, Icon: React.ComponentType, disabled: boolean) => (
+    <Button
+      variant="outline"
+      size="icon"
+      className="size-8"
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onClick={() => props.onPage(to)}
+    >
+      <Icon />
+    </Button>
+  );
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 border-t px-4 py-3 text-sm">
+      <p className="text-muted-foreground tabular-nums">
+        {first > last ? "No requests" : `${fmt.format(first)}–${fmt.format(last)} of ${fmt.format(total)}`}
+        {props.paused && <span className="ml-2">· Live updates show on the first page</span>}
+      </p>
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+        <div className="flex items-center gap-2">
+          <Label htmlFor="requests-page-size" className="font-normal text-muted-foreground">
+            Rows per page
+          </Label>
+          <Select value={String(pageSize)} onValueChange={(v) => props.onPageSize(Number(v))}>
+            <SelectTrigger id="requests-page-size" size="sm" className="w-20">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PAGE_SIZES.map((n) => (
+                <SelectItem key={n} value={String(n)}>
+                  {n}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {nav("First page", 1, ChevronsLeft, page <= 1)}
+          {nav("Previous page", page - 1, ChevronLeft, page <= 1)}
+          <span className="px-2 tabular-nums">
+            Page {fmt.format(page)} of {fmt.format(pageCount)}
+          </span>
+          {nav("Next page", page + 1, ChevronRight, page >= pageCount)}
+          {nav("Last page", pageCount, ChevronsRight, page >= pageCount)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: string }) {
   const [range, setRange] = useState<AccessLogRange>("24h");
   const [service, setService] = useState(props.initialService ?? "");
@@ -133,8 +219,9 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
   const [live, setLive] = useState(true);
   const [stats, setStats] = useState<AccessLogStats | null>(null);
   const [entries, setEntries] = useState<AccessLogEntry[] | null>(null);
-  const [hasMore, setHasMore] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [total, setTotal] = useState<number | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(loadPageSize);
   const [error, setError] = useState<string | null>(null);
   const logStatus = usePoll(api.accessLog, 30_000);
   const [logSettings, setLogSettings] = useState(false);
@@ -154,24 +241,37 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
   const serviceName = (id: TopItem["key"]) =>
     id === null ? "No service" : (names.get(Number(id)) ?? `Deleted service #${id}`);
 
-  /** Refreshes the newest page, keeping older pages that were already loaded unless `reset`. */
-  const refreshEntries = useCallback(
-    async (reset: boolean) => {
-      try {
-        const page = await api.accessLogEntries(filters);
-        setEntries((old) => {
-          if (reset || !old) return page.entries;
-          const oldest = page.entries.at(-1)?.id ?? Infinity;
-          return [...page.entries, ...old.filter((e) => e.id < oldest)];
-        });
-        if (reset) setHasMore(page.hasMore);
-        setError(null);
-      } catch (e) {
-        setError((e as Error).message);
-      }
-    },
-    [filters],
-  );
+  // New filters or page size start over on page 1.
+  const pagingKey = `${JSON.stringify(filters)}/${pageSize}`;
+  const [pagedFor, setPagedFor] = useState(pagingKey);
+  if (pagedFor !== pagingKey) {
+    setPagedFor(pagingKey);
+    setPage(1);
+    setEntries(null);
+    setTotal(null);
+  }
+
+  // Later pages count from the newest request page 1 showed, so they stay put while new requests arrive.
+  const upTo = useRef<number | undefined>(undefined);
+  // Only the latest request's answer is shown, not one for filters or a page that has since changed.
+  const entriesSeq = useRef(0);
+  const refreshEntries = useCallback(async () => {
+    const seq = ++entriesSeq.current;
+    try {
+      const res = await api.accessLogEntries(filters, {
+        page,
+        limit: pageSize,
+        upTo: page > 1 ? upTo.current : undefined,
+      });
+      if (seq !== entriesSeq.current) return;
+      if (page === 1) upTo.current = res.upTo;
+      setEntries(res.entries);
+      setTotal(res.total);
+      setError(null);
+    } catch (e) {
+      if (seq === entriesSeq.current) setError((e as Error).message);
+    }
+  }, [filters, page, pageSize]);
 
   const refreshStats = useCallback(async () => {
     try {
@@ -181,37 +281,41 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
     }
   }, [filters]);
 
-  const reload = useCallback(() => Promise.all([refreshEntries(true), refreshStats()]), [refreshEntries, refreshStats]);
+  const reload = useCallback(() => Promise.all([refreshEntries(), refreshStats()]), [refreshEntries, refreshStats]);
 
   useEffect(() => {
-    setEntries(null);
+    refreshEntries();
+  }, [refreshEntries]);
+
+  useEffect(() => {
     setStats(null);
-    reload();
-  }, [reload]);
+    refreshStats();
+  }, [refreshStats]);
+
+  // Live updates show new requests on page 1; older pages stay as they were when you paged to them.
+  useEffect(() => {
+    if (!live || page > 1) return;
+    const t = setInterval(refreshEntries, LIVE_MS);
+    return () => clearInterval(t);
+  }, [live, page, refreshEntries]);
 
   useEffect(() => {
     if (!live) return;
-    const entriesTimer = setInterval(() => refreshEntries(false), LIVE_MS);
-    const statsTimer = setInterval(refreshStats, STATS_LIVE_MS[range]);
-    return () => {
-      clearInterval(entriesTimer);
-      clearInterval(statsTimer);
-    };
-  }, [live, range, refreshEntries, refreshStats]);
+    const t = setInterval(refreshStats, STATS_LIVE_MS[range]);
+    return () => clearInterval(t);
+  }, [live, range, refreshStats]);
 
-  const loadMore = async () => {
-    if (!entries?.length) return;
-    setLoadingMore(true);
-    try {
-      const page = await api.accessLogEntries(filters, entries.at(-1)!.id);
-      setEntries([...entries, ...page.entries]);
-      setHasMore(page.hasMore);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setLoadingMore(false);
-    }
+  const pageCount = Math.max(1, Math.ceil((total ?? 0) / pageSize));
+  const list = useRef<HTMLDivElement>(null);
+  // The pager is below the list: show the new page from its top.
+  const goToPage = (p: number) => {
+    setPage(p);
+    if (list.current && list.current.getBoundingClientRect().top < 0) list.current.scrollIntoView({ block: "start" });
   };
+  // Past the end, e.g. after old requests were pruned: go to the last page.
+  useEffect(() => {
+    if (total !== null && page > pageCount) setPage(pageCount);
+  }, [total, page, pageCount]);
 
   const t = stats?.totals;
   const filtered = !!(service || status || ip || q);
@@ -385,7 +489,7 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
         />
       </div>
 
-      <Card className="gap-0 py-0">
+      <Card ref={list} className="scroll-mt-4 gap-0 py-0">
         {entries === null ? (
           <div className="space-y-3 p-4">
             {[0, 1, 2, 3, 4].map((i) => (
@@ -440,13 +544,22 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
                 ))}
               </TableBody>
             </Table>
-            {hasMore && (
-              <div className="flex justify-center border-t p-3">
-                <Button variant="outline" size="sm" onClick={loadMore} disabled={loadingMore}>
-                  {loadingMore && <Loader2 className="animate-spin" />} Load older requests
-                </Button>
-              </div>
-            )}
+            <Pagination
+              page={page}
+              pageCount={pageCount}
+              pageSize={pageSize}
+              total={total ?? 0}
+              paused={live && page > 1}
+              onPage={goToPage}
+              onPageSize={(n) => {
+                setPageSize(n);
+                try {
+                  localStorage.setItem(PAGE_SIZE_KEY, String(n));
+                } catch {
+                  // Storage unavailable (e.g. private mode): the choice lasts until reload.
+                }
+              }}
+            />
           </>
         )}
       </Card>

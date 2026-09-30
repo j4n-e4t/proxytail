@@ -300,10 +300,15 @@ export const api = {
   traefik: () => request<TraefikStatus>("GET", "/api/traefik/status"),
   accessLog: () => request<AccessLogStatus>("GET", "/api/access-log"),
   saveAccessLog: (retentionDays: number) => request<AccessLogStatus>("PUT", "/api/access-log", { retentionDays }),
-  accessLogEntries: (f: AccessLogFilters, before?: number) =>
-    request<{ entries: AccessLogEntry[]; hasMore: boolean }>(
+  /** `upTo`: count pages from this request id, as returned for page 1, so they don't shift as new requests arrive. */
+  accessLogEntries: (f: AccessLogFilters, p: { page: number; limit: number; upTo?: number }) =>
+    request<{ entries: AccessLogEntry[]; total: number; upTo: number }>(
       "GET",
-      `/api/access-log/entries?${query(f, before ? { before: String(before) } : {})}`,
+      `/api/access-log/entries?${query(f, {
+        page: String(p.page),
+        limit: String(p.limit),
+        ...(p.upTo && { upTo: String(p.upTo) }),
+      })}`,
     ),
   serviceTraffic: () =>
     request<{ hourStart: string; services: Record<number, ServiceTraffic> }>("GET", "/api/access-log/services"),

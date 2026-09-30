@@ -212,14 +212,15 @@ export function accessLogStatus() {
   return { path: LOG_PATH, ...tail, ...counts, retentionDays: retentionDays() };
 }
 
-export const entries = (f: Filters, before: number | null, limit: number) => listEntries(db, f, before, limit);
-
-// --- Stats, computed in a worker ---
+// --- Stats and request counts, computed in a worker ---
 
 type Stats = ReturnType<typeof stats>;
 type Traffic = ReturnType<typeof serviceTraffic>;
-/** What the worker computes: the Requests page's stats, or the Services list's traffic column. */
-export type WorkerJob = { kind: "stats"; filters: Filters } | { kind: "traffic" };
+/** What the worker computes: the Requests page's stats or request count, or the Services list's traffic column. */
+export type WorkerJob =
+  | { kind: "stats"; filters: Filters }
+  | { kind: "count"; filters: Filters; upTo: number }
+  | { kind: "traffic" };
 
 /** How long a range's stats are reused: a week of requests takes a while to add up. */
 const STATS_TTL: Record<Range, number> = { "1h": 2000, "24h": 10_000, "7d": 30_000 };
@@ -269,6 +270,17 @@ function inWorker<T>(job: WorkerJob, ttl: number): Promise<T> {
 export function accessLogStats(f: Filters): Promise<Stats> {
   where(f); // validates, before anything reaches the worker
   return inWorker<Stats>({ kind: "stats", filters: f }, STATS_TTL[f.range]);
+}
+
+/**
+ * A page of requests, newest first, counted from the `upTo` id (by default the newest request) so later pages stay put
+ * while new requests arrive. `total` is how many match, for the page count.
+ */
+export async function entries(f: Filters, upTo: number | null, page: number, limit: number) {
+  upTo ??= db.query<{ id: number | null }, []>("SELECT max(id) AS id FROM access_log").get()?.id ?? 0;
+  const rows = listEntries(db, f, upTo, (page - 1) * limit, limit);
+  const total = await inWorker<number>({ kind: "count", filters: f, upTo }, STATS_TTL[f.range]);
+  return { entries: rows, total, upTo };
 }
 
 /** Each service's last 24 hours, for the Services list. */

@@ -616,11 +616,12 @@ const server = Bun.serve({
       }),
     },
     "/api/access-log/entries": {
-      GET: handle((req) => {
+      GET: handle(async (req) => {
         const params = new URL(req.url).searchParams;
-        const before = params.get("before") ? parseId(params.get("before")!) : null;
-        const limit = Math.min(Math.max(Number(params.get("limit")) || 100, 1), 500);
-        return json(accessLogEntries(accessLogFilters(params), before, limit));
+        const upTo = params.get("upTo") ? parseId(params.get("upTo")!) : null;
+        const page = Math.max(Math.floor(Number(params.get("page"))) || 1, 1);
+        const limit = Math.min(Math.max(Math.floor(Number(params.get("limit"))) || 50, 1), 500);
+        return json(await accessLogEntries(accessLogFilters(params), upTo, page, limit));
       }),
     },
     "/api/access-log/services": {
