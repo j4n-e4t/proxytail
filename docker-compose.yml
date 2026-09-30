@@ -127,13 +127,20 @@ services:
       TRAEFIK_PROVIDERS_HTTP_ENDPOINT: http://app:3000/api/traefik/config
       TRAEFIK_PROVIDERS_HTTP_POLLINTERVAL: 5s
       TRAEFIK_LOG_LEVEL: INFO
-      # The access log goes to a file that proxytail reads for its Requests page, which empties it once read. It keeps
-      # the User-Agent and Referer headers (other headers are dropped, including Authorization and cookies).
+      # The access log goes to a file that proxytail reads for its Requests page, and empties once read.
       TRAEFIK_ACCESSLOG: "true"
       TRAEFIK_ACCESSLOG_FILEPATH: /var/log/traefik/access.log
       TRAEFIK_ACCESSLOG_FORMAT: json
-      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_NAMES_User-Agent: keep
-      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_NAMES_Referer: keep
+      # Only what the Requests page shows: time, client IP, hostname, the router (service) it matched, status and
+      # response time. Paths, query strings and headers are never written.
+      TRAEFIK_ACCESSLOG_FIELDS_DEFAULTMODE: drop
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_StartUTC: keep
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_ClientHost: keep
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_RequestHost: keep
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_RouterName: keep
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_DownstreamStatus: keep
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_Duration: keep
+      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_DEFAULTMODE: drop
     volumes:
       - traefik-acme:/letsencrypt
       - traefik-logs:/var/log/traefik

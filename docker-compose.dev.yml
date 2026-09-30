@@ -65,8 +65,16 @@ services:
       TRAEFIK_ACCESSLOG: "true"
       TRAEFIK_ACCESSLOG_FILEPATH: /var/log/traefik/access.log
       TRAEFIK_ACCESSLOG_FORMAT: json
-      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_NAMES_User-Agent: keep
-      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_NAMES_Referer: keep
+      # Only what the Requests page shows: time, client IP, hostname, the router (service) it matched, status and
+      # response time. Paths, query strings and headers are never written.
+      TRAEFIK_ACCESSLOG_FIELDS_DEFAULTMODE: drop
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_StartUTC: keep
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_ClientHost: keep
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_RequestHost: keep
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_RouterName: keep
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_DownstreamStatus: keep
+      TRAEFIK_ACCESSLOG_FIELDS_NAMES_Duration: keep
+      TRAEFIK_ACCESSLOG_FIELDS_HEADERS_DEFAULTMODE: drop
     healthcheck:
       test: ["CMD", "traefik", "healthcheck"]
       interval: 30s

@@ -18,85 +18,69 @@ const POLL_MS = 1000;
 const PRUNE_MS = 10 * 60_000;
 export const DEFAULT_RETENTION_DAYS = 7;
 
-db.run(`
-  CREATE TABLE IF NOT EXISTS access_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    time INTEGER NOT NULL,
-    host_id INTEGER,
-    router TEXT,
-    client_ip TEXT NOT NULL,
-    method TEXT NOT NULL,
-    host TEXT NOT NULL,
-    path TEXT NOT NULL,
-    protocol TEXT,
-    status INTEGER NOT NULL,
-    origin_status INTEGER,
-    duration_ms REAL NOT NULL,
-    origin_ms REAL,
-    size INTEGER NOT NULL,
-    user_agent TEXT,
-    referer TEXT,
-    tls_version TEXT,
-    entrypoint TEXT
-  )
-`);
+/**
+ * Each request is stored with only its time, client IP, target (the hostname, and the service it matched), status and
+ * response time. Traefik is configured to write nothing else to its access log either (see docker-compose.yml).
+ */
+const SCHEMA = `(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  time INTEGER NOT NULL,
+  client_ip TEXT NOT NULL,
+  host TEXT NOT NULL,
+  host_id INTEGER,
+  status INTEGER NOT NULL,
+  duration_ms REAL NOT NULL
+)`;
+db.run(`CREATE TABLE IF NOT EXISTS access_log ${SCHEMA}`);
+
+// The first version also stored paths, methods, user agents and more: keep only the columns above, and vacuum so the
+// dropped data doesn't linger in free pages.
+const logColumns = db.query<{ name: string }, []>("PRAGMA table_info(access_log)").all().map((c) => c.name);
+if (logColumns.includes("path")) {
+  db.transaction(() => {
+    db.run(`CREATE TABLE access_log_new ${SCHEMA}`);
+    db.run(
+      `INSERT INTO access_log_new (id, time, client_ip, host, host_id, status, duration_ms)
+       SELECT id, time, client_ip, host, host_id, status, duration_ms FROM access_log`,
+    );
+    db.run("DROP TABLE access_log");
+    db.run("ALTER TABLE access_log_new RENAME TO access_log");
+  })();
+  db.run("VACUUM");
+  console.log("Reduced the request log to client IP, target, status, response time and time");
+}
 db.run("CREATE INDEX IF NOT EXISTS access_log_time ON access_log (time)");
 db.run("CREATE INDEX IF NOT EXISTS access_log_host_time ON access_log (host_id, time)");
 
-/** A line of Traefik's JSON access log; only the fields proxytail keeps. */
+/** A line of Traefik's JSON access log: the fields it's configured to keep. */
 interface TraefikEntry {
   StartUTC?: string;
   RouterName?: string;
   ClientHost?: string;
-  RequestMethod?: string;
   RequestHost?: string;
-  RequestPath?: string;
-  RequestProtocol?: string;
   DownstreamStatus?: number;
-  OriginStatus?: number;
   Duration?: number;
-  OriginDuration?: number;
-  DownstreamContentSize?: number;
-  "request_User-Agent"?: string;
-  request_Referer?: string;
-  TLSVersion?: string;
-  entryPointName?: string;
 }
 
 const ROUTER_RE = /^proxytail-host-(\d+)@/;
 
 const insert = db.query(
-  `INSERT INTO access_log (time, host_id, router, client_ip, method, host, path, protocol, status, origin_status,
-     duration_ms, origin_ms, size, user_agent, referer, tls_version, entrypoint)
-   VALUES ($time, $host_id, $router, $client_ip, $method, $host, $path, $protocol, $status, $origin_status,
-     $duration_ms, $origin_ms, $size, $user_agent, $referer, $tls_version, $entrypoint)`,
+  `INSERT INTO access_log (time, client_ip, host, host_id, status, duration_ms)
+   VALUES ($time, $client_ip, $host, $host_id, $status, $duration_ms)`,
 );
 
 function toRow(e: TraefikEntry) {
   if (typeof e.DownstreamStatus !== "number" || !e.StartUTC) return null;
   const time = Date.parse(e.StartUTC);
   if (Number.isNaN(time)) return null;
-  const router = e.RouterName || null;
-  const hostId = router?.match(ROUTER_RE)?.[1];
+  const hostId = e.RouterName?.match(ROUTER_RE)?.[1];
   return {
     time,
-    host_id: hostId ? Number(hostId) : null,
-    router,
     client_ip: e.ClientHost ?? "",
-    method: e.RequestMethod ?? "",
     host: e.RequestHost ?? "",
-    path: e.RequestPath ?? "",
-    protocol: e.RequestProtocol ?? null,
+    host_id: hostId ? Number(hostId) : null,
     status: e.DownstreamStatus,
-    // 0 when the request never reached the service, e.g. rate limited or no router.
-    origin_status: e.OriginStatus || null,
     duration_ms: (e.Duration ?? 0) / 1e6,
-    origin_ms: e.OriginDuration ? e.OriginDuration / 1e6 : null,
-    size: e.DownstreamContentSize ?? 0,
-    user_agent: e["request_User-Agent"] ?? null,
-    referer: e.request_Referer ?? null,
-    tls_version: e.TLSVersion ?? null,
-    entrypoint: e.entryPointName ?? null,
   };
 }
 

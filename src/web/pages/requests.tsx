@@ -3,7 +3,6 @@ import { FileWarning, Loader2, RefreshCw, Search, X } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -42,18 +41,6 @@ export function fmtDuration(ms: number | null) {
   if (ms < 1) return `${ms.toFixed(2)} ms`;
   if (ms < 1000) return `${Math.round(ms)} ms`;
   return `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)} s`;
-}
-
-function fmtBytes(n: number) {
-  if (n < 1024) return `${n} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let v = n / 1024;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
 }
 
 const pct = (part: number, whole: number) => (whole ? `${((part / whole) * 100).toFixed(part && part < whole / 100 ? 2 : 1)}%` : "–");
@@ -135,53 +122,6 @@ function TopList(props: {
   );
 }
 
-function Detail({ entry, service, onClose }: { entry: AccessLogEntry | null; service: string; onClose: () => void }) {
-  const rows: [string, React.ReactNode][] = entry
-    ? [
-        ["Time", new Date(entry.time).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" })],
-        ["Status", <StatusCode status={entry.status} />],
-        [
-          "Service status",
-          entry.originStatus ?? <span className="text-muted-foreground">Didn't reach the service</span>,
-        ],
-        ["Service", service],
-        ["Client IP", <span className="font-mono">{entry.clientIp}</span>],
-        ["Protocol", [entry.protocol, entry.tlsVersion && `TLS ${entry.tlsVersion}`].filter(Boolean).join(" · ") || "–"],
-        ["Duration", fmtDuration(entry.durationMs)],
-        ["At the service", fmtDuration(entry.originMs)],
-        ["Response size", fmtBytes(entry.size)],
-        ["User agent", entry.userAgent ?? "–"],
-        ["Referer", entry.referer ?? "–"],
-        ["Traefik router", <span className="font-mono text-xs">{entry.router ?? "none"}</span>],
-      ]
-    : [];
-  return (
-    <Dialog open={!!entry} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-2xl">
-        {entry && (
-          <>
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2 font-mono text-base">
-                <span className="text-muted-foreground">{entry.method}</span>
-                <span className="truncate">{entry.host}</span>
-              </DialogTitle>
-              <DialogDescription className="font-mono text-xs break-all">{entry.path}</DialogDescription>
-            </DialogHeader>
-            <dl className="grid grid-cols-[9rem_1fr] gap-x-4 gap-y-2 text-sm">
-              {rows.map(([k, v]) => (
-                <div key={k} className="contents">
-                  <dt className="text-muted-foreground">{k}</dt>
-                  <dd className="min-w-0 break-words">{v}</dd>
-                </div>
-              ))}
-            </dl>
-          </>
-        )}
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: string }) {
   const [range, setRange] = useState<AccessLogRange>("24h");
   const [service, setService] = useState(props.initialService ?? "");
@@ -195,7 +135,6 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<AccessLogEntry | null>(null);
   const logStatus = usePoll(api.accessLog, 30_000);
 
   // Typing searches after a pause, not on every key.
@@ -341,7 +280,7 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Path, host, IP or user agent…"
+            placeholder="Hostname or client IP…"
             className="pl-8"
           />
         </div>
@@ -384,7 +323,7 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
         )}
       </div>
 
-      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
         <Tile label="Requests" value={t ? fmt.format(t.requests) : "–"} />
         <Tile label="Clients" value={t ? fmt.format(t.clients) : "–"} detail="distinct IPs" />
         <Tile
@@ -402,7 +341,6 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
           value={t ? fmtDuration(t.p95Ms) : "–"}
           detail={t?.p50Ms != null ? `p95 · median ${fmtDuration(t.p50Ms)}` : "p95"}
         />
-        <Tile label="Data sent" value={t ? fmtBytes(t.bytes) : "–"} />
       </div>
 
       <Card className="mb-4 gap-4">
@@ -425,7 +363,7 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
           label={serviceName}
           onPick={(k) => setService(k === null ? "none" : String(k))}
         />
-        <TopList title="Paths" items={stats?.paths} label={(k) => k} onPick={(k) => setSearch(String(k))} mono />
+        <TopList title="Hostnames" items={stats?.hosts} label={(k) => k} onPick={(k) => setSearch(String(k))} mono />
         <TopList title="Clients" items={stats?.clients} label={(k) => k} onPick={(k) => setIp(String(k))} mono />
         <TopList
           title="Status codes"
@@ -451,47 +389,41 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
             <Table className="table-fixed">
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
-                  <TableHead className="w-28 pl-4">Time</TableHead>
-                  <TableHead className="w-20">Status</TableHead>
-                  <TableHead className="w-20">Method</TableHead>
-                  <TableHead>Request</TableHead>
-                  <TableHead className="w-36">Client</TableHead>
-                  <TableHead className="w-24 text-right">Duration</TableHead>
-                  <TableHead className="w-24 pr-4 text-right">Size</TableHead>
+                  <TableHead className="w-32 pl-4">Time</TableHead>
+                  <TableHead className="w-24">Status</TableHead>
+                  <TableHead>Target</TableHead>
+                  <TableHead className="w-48">Client</TableHead>
+                  <TableHead className="w-32 pr-4 text-right">Response time</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {entries.map((e) => (
-                  <TableRow key={e.id} className="cursor-pointer" onClick={() => setSelected(e)}>
+                  <TableRow key={e.id}>
                     <TableCell className="pl-4 text-xs text-muted-foreground tabular-nums">
                       {clock(e.time, withDate)}
                     </TableCell>
                     <TableCell>
                       <StatusCode status={e.status} />
                     </TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">{e.method}</TableCell>
                     <TableCell className="min-w-0">
-                      <p className="truncate font-mono text-xs">
-                        <span className="text-muted-foreground">{e.host}</span>
-                        {e.path}
+                      <p className="truncate">
+                        <span className="font-mono text-xs">{e.host}</span>
+                        {/* The service, when the hostname isn't its own primary one, or none matched. */}
+                        {serviceName(e.serviceId) !== e.host && (
+                          <span className="ml-2 text-xs text-muted-foreground">{serviceName(e.serviceId)}</span>
+                        )}
                       </p>
                     </TableCell>
                     <TableCell>
                       <button
                         className="truncate font-mono text-xs hover:underline"
-                        onClick={(ev) => {
-                          ev.stopPropagation();
-                          setIp(e.clientIp);
-                        }}
+                        onClick={() => setIp(e.clientIp)}
                         title="Show only this client"
                       >
                         {e.clientIp}
                       </button>
                     </TableCell>
-                    <TableCell className="text-right text-xs tabular-nums">{fmtDuration(e.durationMs)}</TableCell>
-                    <TableCell className="pr-4 text-right text-xs text-muted-foreground tabular-nums">
-                      {fmtBytes(e.size)}
-                    </TableCell>
+                    <TableCell className="pr-4 text-right text-xs tabular-nums">{fmtDuration(e.durationMs)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -506,12 +438,6 @@ export function RequestsPage(props: { hosts: ProxyHost[]; initialService?: strin
           </>
         )}
       </Card>
-
-      <Detail
-        entry={selected}
-        service={selected ? serviceName(selected.serviceId) : ""}
-        onClose={() => setSelected(null)}
-      />
     </>
   );
 }

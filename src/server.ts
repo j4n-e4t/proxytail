@@ -302,7 +302,7 @@ function accessLogFilters(params: URLSearchParams): Filters {
   if (!Object.hasOwn(ACCESS_LOG_RANGES, range))
     throw new HttpError(400, `Range must be one of ${Object.keys(ACCESS_LOG_RANGES).join(", ")}`);
   const get = (key: string) => params.get(key)?.trim() || undefined;
-  return { range, service: get("service"), status: get("status"), method: get("method"), ip: get("ip"), q: get("q") };
+  return { range, service: get("service"), status: get("status"), ip: get("ip"), q: get("q") };
 }
 
 const port = Number(process.env.PORT ?? 3000);

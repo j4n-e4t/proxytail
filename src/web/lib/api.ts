@@ -176,26 +176,17 @@ export interface AccessLogFilters {
   q?: string;
 }
 
+/** A request, as stored: nothing but these fields. */
 export interface AccessLogEntry {
   id: number;
   time: string;
-  serviceId: number | null;
-  router: string | null;
   clientIp: string;
-  method: string;
+  /** The hostname the client asked for. */
   host: string;
-  path: string;
-  protocol: string | null;
+  /** The service it matched; null when none did. */
+  serviceId: number | null;
   status: number;
-  /** The service's own status; null when the request never reached it (e.g. rate limited). */
-  originStatus: number | null;
   durationMs: number;
-  originMs: number | null;
-  size: number;
-  userAgent: string | null;
-  referer: string | null;
-  tlsVersion: string | null;
-  entrypoint: string | null;
 }
 
 export type StatusClass = "2xx" | "3xx" | "4xx" | "5xx";
@@ -215,14 +206,13 @@ export interface AccessLogStats {
     clients: number;
     clientErrors: number;
     serverErrors: number;
-    bytes: number;
     p50Ms: number | null;
     p95Ms: number | null;
   };
   timeline: ({ start: string } & Record<StatusClass, number>)[];
-  paths: TopItem[];
-  clients: TopItem[];
   services: TopItem[];
+  hosts: TopItem[];
+  clients: TopItem[];
   statuses: { status: number; requests: number }[];
 }
 

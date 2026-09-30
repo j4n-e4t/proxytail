@@ -175,21 +175,23 @@ before basic auth, so it also slows down password guessing. Requests over the li
 
 The **Requests** page shows what Traefik served over the last hour, 24 hours or 7 days:
 
-- the number of requests and distinct clients, the share of 4xx and 5xx responses, response times (95th percentile and
-  median) and the data sent;
-- requests over time, stacked by status class, and the top services, paths, clients and status codes. Click one to
+- the number of requests and distinct clients, the share of 4xx and 5xx responses, and response times (95th
+  percentile and median);
+- requests over time, stacked by status class, and the top services, hostnames, clients and status codes. Click one to
   filter the page by it;
-- the requests themselves, newest first, with a search across paths, hostnames, client IPs and user agents. Click a
-  request for its details: the status the service itself returned (none when Traefik answered, e.g. with a `429`),
-  time spent at the service, TLS version, user agent and referer.
+- the requests themselves, newest first: time, status, target (hostname and service), client IP and response time,
+  with a search across hostnames and client IPs.
+
+Each request is stored with those five things only. Paths, query strings, methods and headers aren't stored, and
+Traefik doesn't write them to its access log in the first place.
 
 **Live** refreshes the list every 5 seconds, and the figures every 5 seconds to a minute depending on the period. The
 **No service** filter shows requests no service matched, e.g. for hostnames that aren't set up.
 
 How it works:
 
-- Traefik writes its access log as JSON to the `traefik-logs` volume, keeping the `User-Agent` and `Referer` headers
-  and dropping all others, including `Authorization` and cookies.
+- Traefik writes its access log as JSON to the `traefik-logs` volume, with every field dropped except the start time,
+  client IP, hostname, router (the service), status and duration.
 - proxytail follows the file, stores each request in its database, and empties the file once it has read it past
   16 MB, so it needs write access to the volume. If it can't, **Settings → Request log** says so.
 - Requests are kept for 7 days by default (**Settings → Request log**, 1 to 90 days), and at most a million of them
@@ -230,9 +232,8 @@ at the network layer. That's a deliberate trade-off for personal and homelab set
 - **Traefik's API is unauthenticated** (routers, services, basic auth hashes), so it's only reachable on the Docker
   network, like `/api/traefik/config`.
 - **Valkey has no password** and is only reachable on the Docker network. It only holds rate limit counters.
-- **The request log is personal data:** client IPs, user agents, and full URLs including query strings, which can hold
-  tokens if a service puts them there. It stays in proxytail's database for the retention you set, and anyone who can
-  open the UI can read it.
+- **The request log holds client IPs,** which are personal data, with the hostname, status and response time of each
+  request. It stays in proxytail's database for the retention you set, and anyone who can open the UI can read it.
 
 Traefik can reach the internet (it needs to for Let's Encrypt), and it holds the certificates and basic auth hashes it
 serves. Client CAs are stored as certificates only, without keys, so neither proxytail nor Traefik can mint client

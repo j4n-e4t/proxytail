@@ -15,9 +15,8 @@ export interface Filters {
   service?: string;
   /** "2xx" … "5xx", or an exact status code. */
   status?: string;
-  method?: string;
   ip?: string;
-  /** Searched in the path, hostname, client IP and user agent. */
+  /** Searched in the hostname and client IP. */
   q?: string;
 }
 
@@ -44,17 +43,13 @@ export function where(f: Filters) {
       params.status = Number(f.status);
     } else throw new FilterError("Status must be a class like 4xx or a code like 404");
   }
-  if (f.method) {
-    clauses.push("method = $method");
-    params.method = f.method.toUpperCase();
-  }
   if (f.ip) {
     clauses.push("client_ip = $ip");
     params.ip = f.ip;
   }
   if (f.q) {
     clauses.push(
-      "(path LIKE $q ESCAPE '\\' OR host LIKE $q ESCAPE '\\' OR client_ip LIKE $q ESCAPE '\\' OR user_agent LIKE $q ESCAPE '\\')",
+      "(host LIKE $q ESCAPE '\\' OR client_ip LIKE $q ESCAPE '\\')",
     );
     params.q = `%${f.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
   }
@@ -64,43 +59,21 @@ export function where(f: Filters) {
 interface Row {
   id: number;
   time: number;
-  host_id: number | null;
-  router: string | null;
   client_ip: string;
-  method: string;
   host: string;
-  path: string;
-  protocol: string | null;
+  host_id: number | null;
   status: number;
-  origin_status: number | null;
   duration_ms: number;
-  origin_ms: number | null;
-  size: number;
-  user_agent: string | null;
-  referer: string | null;
-  tls_version: string | null;
-  entrypoint: string | null;
 }
 
 const toEntry = (r: Row) => ({
   id: r.id,
   time: new Date(r.time).toISOString(),
-  serviceId: r.host_id,
-  router: r.router,
   clientIp: r.client_ip,
-  method: r.method,
   host: r.host,
-  path: r.path,
-  protocol: r.protocol,
+  serviceId: r.host_id,
   status: r.status,
-  originStatus: r.origin_status,
   durationMs: r.duration_ms,
-  originMs: r.origin_ms,
-  size: r.size,
-  userAgent: r.user_agent,
-  referer: r.referer,
-  tlsVersion: r.tls_version,
-  entrypoint: r.entrypoint,
 });
 
 /** The newest requests matching the filters, before the `before` id when paging. */
@@ -118,16 +91,13 @@ export function listEntries(db: Database, f: Filters, before: number | null, lim
 
 const BINS_PER_E = 20;
 
-/** The path without its query string. */
-const PATH_SQL = "CASE WHEN instr(path, '?') > 0 THEN substr(path, 1, instr(path, '?') - 1) ELSE path END";
-
 export function stats(db: Database, f: Filters) {
   const w = where(f);
   const q = <T>(sql: string) => db.query<T, any>(sql);
-  const totals = q<{ requests: number; clients: number; clientErrors: number; serverErrors: number; bytes: number }>(
+  const totals = q<{ requests: number; clients: number; clientErrors: number; serverErrors: number }>(
     `SELECT count(*) AS requests, count(DISTINCT client_ip) AS clients,
        coalesce(sum(status BETWEEN 400 AND 499), 0) AS clientErrors,
-       coalesce(sum(status >= 500), 0) AS serverErrors, coalesce(sum(size), 0) AS bytes
+       coalesce(sum(status >= 500), 0) AS serverErrors
      FROM access_log WHERE ${w.sql}`,
   ).get(w.params)!;
   // Percentiles from a histogram of log-scaled durations (5% wide bins), rather than sorting every request.
@@ -170,9 +140,9 @@ export function stats(db: Database, f: Filters) {
     bucketMs: bucket,
     totals: { ...totals, p50Ms: percentile(0.5), p95Ms: percentile(0.95) },
     timeline: [...timeline.values()],
-    paths: top(PATH_SQL),
-    clients: top("client_ip"),
     services: top("host_id"),
+    hosts: top("host"),
+    clients: top("client_ip"),
     statuses: q<{ status: number; requests: number }>(
       `SELECT status, count(*) AS requests FROM access_log WHERE ${w.sql} GROUP BY status ORDER BY requests DESC LIMIT 8`,
     ).all(w.params),
