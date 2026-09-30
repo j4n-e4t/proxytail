@@ -28,7 +28,7 @@ import { api } from "@/lib/api";
 import { useTheme, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { BasicAuthUsersPage } from "@/pages/basic-auth-users";
-import { CaptchasPage } from "@/pages/captchas";
+import { CaptchaPage } from "@/pages/captcha";
 import { ClientCasPage } from "@/pages/client-cas";
 import { PeersPage } from "@/pages/peers";
 import { RateLimitingPage } from "@/pages/rate-limiting";
@@ -45,7 +45,7 @@ type Page =
   | "domains"
   | "client-cas"
   | "users"
-  | "captchas"
+  | "captcha"
   | "peers"
   | "rate-limiting"
   | "settings";
@@ -55,7 +55,7 @@ const PAGES: Page[] = [
   "domains",
   "client-cas",
   "users",
-  "captchas",
+  "captcha",
   "peers",
   "rate-limiting",
   "settings",
@@ -226,7 +226,7 @@ function Console() {
   const domains = usePoll(api.domains, 0);
   const clientCas = usePoll(api.clientCas, 0);
   const users = usePoll(api.basicAuthUsers, 0);
-  const captchas = usePoll(api.captchas, 0);
+  const captcha = usePoll(api.captcha, 0);
   const traefik = usePoll(api.traefik, 5000);
   const devices = usePoll(
     useCallback(() => api.devices(), []),
@@ -249,7 +249,7 @@ function Console() {
       items: [
         { target: "users", label: "Basic auth users", icon: KeyRound, count: users.data?.length },
         { target: "client-cas", label: "Client CAs", icon: ShieldCheck, count: clientCas.data?.length },
-        { target: "captchas", label: "Captchas", icon: BotOff, count: captchas.data?.length },
+        { target: "captcha", label: "Captcha", icon: BotOff },
         { target: "rate-limiting", label: "Rate limiting", icon: Gauge },
       ],
     },
@@ -299,7 +299,7 @@ function Console() {
     domains.reload();
     clientCas.reload();
     users.reload();
-    captchas.reload();
+    captcha.reload();
     traefik.reload();
   };
 
@@ -407,13 +407,14 @@ function Console() {
               onOpenService={(id) => navigate(`services/${id}`)}
             />
           )}
-          {page === "captchas" && (
-            <CaptchasPage
-              captchas={captchas.data}
+          {page === "captcha" && (
+            <CaptchaPage
+              view={captcha.data}
+              error={captcha.error}
               hosts={hosts.data ?? []}
-              onChanged={() => {
-                captchas.reload();
-                hosts.reload();
+              onChanged={(v) => {
+                captcha.setData(v);
+                traefik.reload();
               }}
               onOpenService={(id) => navigate(`services/${id}`)}
             />
@@ -460,12 +461,12 @@ function Console() {
         domains={domains.data}
         clientCas={clientCas.data}
         basicAuthUsers={users.data}
-        captchas={captchas.data}
+        captcha={captcha.data}
         traefik={traefik.data}
         onOpenDomains={() => setPage("domains")}
         onOpenClientCas={() => setPage("client-cas")}
         onOpenUsers={() => setPage("users")}
-        onOpenCaptchas={() => setPage("captchas")}
+        onOpenCaptcha={() => setPage("captcha")}
         onCancel={() => setPage("services")}
         onSaved={() => {
           refreshHosts();

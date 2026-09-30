@@ -14,11 +14,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DeviceBadge } from "@/components/device-badge";
 import { DevicePicker } from "@/components/device-picker";
 import { ServiceIcon, serviceState } from "@/components/status";
-import { lifetimeLabel } from "@/pages/captchas";
+import { lifetimeLabel } from "@/pages/captcha";
 import {
   api,
   type BasicAuthUser,
-  type Captcha,
+  type CaptchaView,
   type ClientAuth,
   type ClientCa,
   type Device,
@@ -35,12 +35,12 @@ interface EditorProps {
   domains: Domain[] | null;
   clientCas: ClientCa[] | null;
   basicAuthUsers: BasicAuthUser[] | null;
-  captchas: Captcha[] | null;
+  captcha: CaptchaView | null;
   traefik: TraefikStatus | null;
   onOpenDomains: () => void;
   onOpenClientCas: () => void;
   onOpenUsers: () => void;
-  onOpenCaptchas: () => void;
+  onOpenCaptcha: () => void;
   onCancel: () => void;
   onSaved: () => void;
 }
@@ -53,7 +53,7 @@ export function ServiceEditorDialog(
     props.domains === null ||
     props.clientCas === null ||
     props.basicAuthUsers === null ||
-    props.captchas === null ||
+    props.captcha === null ||
     (props.hostId !== null && props.hosts === null);
   const existing = props.hostId !== null ? props.hosts?.find((h) => h.id === props.hostId) : undefined;
   return (
@@ -79,7 +79,7 @@ export function ServiceEditorDialog(
             domains={props.domains!}
             clientCas={props.clientCas!}
             basicAuthUsers={props.basicAuthUsers!}
-            captchas={props.captchas!}
+            captcha={props.captcha!}
             existing={existing ?? null}
           />
         )}
@@ -136,7 +136,7 @@ function ServiceForm(
     domains: Domain[];
     clientCas: ClientCa[];
     basicAuthUsers: BasicAuthUser[];
-    captchas: Captcha[];
+    captcha: CaptchaView;
     existing: ProxyHost | null;
     initialDeviceId?: string;
   },
@@ -170,8 +170,7 @@ function ServiceForm(
   );
   const [certHeaders, setCertHeaders] = useState(existing?.clientCertHeaders ?? false);
   const [noIndex, setNoIndex] = useState(existing?.noIndex ?? false);
-  const [captchaOn, setCaptchaOn] = useState(existing?.captchaId != null);
-  const [captchaId, setCaptchaId] = useState<number | null>(existing?.captchaId ?? null);
+  const [captcha, setCaptcha] = useState(existing?.captcha ?? false);
   const [tab, setTab] = useState<Tab>("domains");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -191,12 +190,6 @@ function ServiceForm(
     if (on && !userIds.length && props.basicAuthUsers.length === 1) setUserIds([props.basicAuthUsers[0]!.id]);
   };
 
-  const toggleCaptcha = (on: boolean) => {
-    setCaptchaOn(on);
-    // Preselect the only captcha, the common case.
-    if (on && captchaId === null && props.captchas.length === 1) setCaptchaId(props.captchas[0]!.id);
-  };
-
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -208,7 +201,8 @@ function ServiceForm(
     if (rows.some((r) => !r.base)) return invalid("domains", "Pick a domain for the hostname and every alias.");
     if (!deviceId) return invalid("target", "Pick the tailnet peer that runs this service.");
     if (!port) return invalid("target", "Enter the port your service is listening on.");
-    if (captchaOn && captchaId === null) return invalid("auth", "Pick the captcha visitors have to solve.");
+    if (captcha && !props.captcha.configured && !existing?.captcha)
+      return invalid("auth", "Set up the captcha under Security → Captcha first.");
     if (basicAuth && !userIds.length) return invalid("auth", "Pick at least one user who can sign in.");
     if (clientAuth !== "off" && !caIds.length)
       return invalid("auth", "Pick a CA to verify client certificates against.");
@@ -226,7 +220,7 @@ function ServiceForm(
       clientCaIds: clientAuth === "off" ? [] : caIds,
       clientCertHeaders: clientAuth !== "off" && certHeaders,
       noIndex,
-      captchaId: captchaOn ? captchaId : null,
+      captcha,
     };
     setSaving(true);
     try {
@@ -324,7 +318,7 @@ function ServiceForm(
             <TabsTrigger value="target">Target</TabsTrigger>
             <TabsTrigger value="auth">
               Authentication
-              {(captchaOn || basicAuth || clientAuth !== "off") && <span className="size-1.5 rounded-full bg-primary" aria-label="on" />}
+              {(captcha || basicAuth || clientAuth !== "off") && <span className="size-1.5 rounded-full bg-primary" aria-label="on" />}
             </TabsTrigger>
             <TabsTrigger value="advanced">
               Advanced
@@ -468,41 +462,25 @@ function ServiceForm(
             <Section
               title="Captcha"
               description="Visitors solve a Cloudflare Turnstile challenge before reaching the service, and aren't asked again for a while."
-              action={<Switch checked={captchaOn} onCheckedChange={toggleCaptcha} aria-label="Require a captcha" />}
+              action={<Switch checked={captcha} onCheckedChange={setCaptcha} aria-label="Require a captcha" />}
             >
-              {captchaOn &&
-                (props.captchas.length === 0 ? (
+              {captcha &&
+                (!props.captcha.configured ? (
                   <div className="flex items-center justify-between gap-4 rounded-lg border border-dashed p-4">
-                    <p className="text-sm text-muted-foreground">You haven't added a captcha yet.</p>
-                    <Button type="button" variant="outline" size="sm" onClick={props.onOpenCaptchas}>
-                      <BotOff /> Manage captchas
+                    <p className="text-sm text-muted-foreground">You haven't set up the captcha yet.</p>
+                    <Button type="button" variant="outline" size="sm" onClick={props.onOpenCaptcha}>
+                      <BotOff /> Set up captcha
                     </Button>
                   </div>
                 ) : (
-                  <div className="space-y-2">
-                    <Select value={captchaId === null ? "" : String(captchaId)} onValueChange={(v) => setCaptchaId(Number(v))}>
-                      <SelectTrigger className="w-full" aria-label="Captcha">
-                        <SelectValue placeholder="Pick a captcha" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {props.captchas.map((c) => (
-                          <SelectItem key={c.id} value={String(c.id)}>
-                            {c.name}
-                            <span className="text-xs text-muted-foreground">
-                              Remembers visitors for {lifetimeLabel(c.lifetime)}
-                            </span>
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <p className="text-xs text-muted-foreground">
-                      Allow <span className="font-mono">{firstDomain}</span> and its parallel aliases in the widget's
-                      hostnames in Cloudflare. Scripts and API clients without a browser can't get through.{" "}
-                      <button type="button" className="underline" onClick={props.onOpenCaptchas}>
-                        Manage captchas
-                      </button>
-                    </p>
-                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Visitors are remembered for {lifetimeLabel(props.captcha.lifetime)}. Allow{" "}
+                    <span className="font-mono">{firstDomain}</span> and its parallel aliases in the widget's hostnames in
+                    Cloudflare. Scripts and API clients without a browser can't get through.{" "}
+                    <button type="button" className="underline" onClick={props.onOpenCaptcha}>
+                      Captcha settings
+                    </button>
+                  </p>
                 ))}
             </Section>
 

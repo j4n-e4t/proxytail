@@ -28,24 +28,6 @@ db.run(`
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `);
-// Captchas (Cloudflare Turnstile widgets), shared by the services they're attached to. `secret_key` verifies solved
-// challenges with Cloudflare; it never leaves the server.
-db.run(`
-  CREATE TABLE IF NOT EXISTS captchas (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    site_key TEXT NOT NULL,
-    secret_key TEXT NOT NULL,
-    lifetime INTEGER NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )
-`);
-// hCaptcha was dropped: every captcha is a Turnstile widget.
-if (db.query<{ name: string }, []>("PRAGMA table_info(captchas)").all().some((c) => c.name === "provider")) {
-  db.run("ALTER TABLE captchas DROP COLUMN provider");
-}
-
 // Columns added after the initial release.
 const hostColumns = db.query<{ name: string }, []>("PRAGMA table_info(proxy_hosts)").all().map((c) => c.name);
 if (!hostColumns.includes("basic_auth")) {
@@ -58,9 +40,9 @@ if (!hostColumns.includes("alias_modes")) {
 if (!hostColumns.includes("no_index")) {
   db.run("ALTER TABLE proxy_hosts ADD COLUMN no_index INTEGER NOT NULL DEFAULT 0");
 }
-// The captcha visitors solve first, if any. Like CAs and users, a captcha that's in use can't be deleted.
-if (!hostColumns.includes("captcha_id")) {
-  db.run("ALTER TABLE proxy_hosts ADD COLUMN captcha_id INTEGER REFERENCES captchas(id) ON DELETE RESTRICT");
+// Visitors solve the captcha (Security → Captcha) before reaching the service.
+if (!hostColumns.includes("captcha")) {
+  db.run("ALTER TABLE proxy_hosts ADD COLUMN captcha INTEGER NOT NULL DEFAULT 0");
 }
 // Custom request headers and framing were removed; only "hide from search engines" stays.
 if (hostColumns.includes("headers")) {
@@ -184,19 +166,6 @@ export interface Alias {
   mode: AliasMode;
 }
 
-/** A Cloudflare Turnstile widget, shared by the services it's attached to. */
-export interface Captcha {
-  id: number;
-  name: string;
-  siteKey: string;
-  /** Cloudflare's secret for verifying solved challenges. Never sent to the browser. */
-  secretKey: string;
-  /** Seconds a visitor who solved it can use the service before being asked again. */
-  lifetime: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
 /** A basic auth user; `hash` is an htpasswd-compatible bcrypt hash. */
 export interface BasicAuthUser {
   id: number;
@@ -228,8 +197,8 @@ export interface ProxyHost {
   clientCertHeaders: boolean;
   /** Sends `X-Robots-Tag: noindex, nofollow`, so search engines don't index the service. */
   noIndex: boolean;
-  /** The captcha visitors have to solve before reaching the service, or null for none. */
-  captchaId: number | null;
+  /** Visitors solve the captcha before reaching the service. */
+  captcha: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -250,7 +219,7 @@ interface ProxyHostRow {
   client_auth: ClientAuth;
   client_cert_headers: number;
   no_index: number;
-  captcha_id: number | null;
+  captcha: number;
   alias_modes: string;
   created_at: string;
   updated_at: string;
@@ -295,7 +264,7 @@ function toHost(r: ProxyHostRow, links = allLinks(r.id)): ProxyHost {
     clientCaIds: links.cas.get(r.id) ?? [],
     clientCertHeaders: !!r.client_cert_headers,
     noIndex: !!r.no_index,
-    captchaId: r.captcha_id,
+    captcha: !!r.captcha,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -316,7 +285,7 @@ function toParams(h: ProxyHostInput) {
     client_auth: h.clientAuth,
     client_cert_headers: h.clientCertHeaders ? 1 : 0,
     no_index: h.noIndex ? 1 : 0,
-    captcha_id: h.captchaId,
+    captcha: h.captcha ? 1 : 0,
   };
 }
 
@@ -348,17 +317,14 @@ export const hosts = {
     const row = db.query<ProxyHostRow, [number]>("SELECT * FROM proxy_hosts WHERE id = ?").get(id);
     return row ? toHost(row) : null;
   },
-  /**
-   * Throws a SQLite foreign key error if one of the CAs or users, or the captcha, doesn't exist (anymore); nothing is
-   * written then.
-   */
+  /** Throws a SQLite foreign key error if one of the CAs or users doesn't exist (anymore); nothing is written then. */
   create: db.transaction((h: ProxyHostInput): ProxyHost => {
     const row = db
       .query<ProxyHostRow, any>(
         `INSERT INTO proxy_hosts (domains, device_id, device_name, target_ip, target_port, scheme, insecure_skip_verify, enabled,
-           basic_auth, client_auth, client_cert_headers, no_index, captcha_id, alias_modes)
+           basic_auth, client_auth, client_cert_headers, no_index, captcha, alias_modes)
          VALUES ($domains, $device_id, $device_name, $target_ip, $target_port, $scheme, $insecure_skip_verify, $enabled,
-           $basic_auth, $client_auth, $client_cert_headers, $no_index, $captcha_id, $alias_modes)
+           $basic_auth, $client_auth, $client_cert_headers, $no_index, $captcha, $alias_modes)
          RETURNING *`,
       )
       .get(toParams(h))!;
@@ -372,7 +338,7 @@ export const hosts = {
            target_ip = $target_ip, target_port = $target_port, scheme = $scheme,
            insecure_skip_verify = $insecure_skip_verify, enabled = $enabled, basic_auth = $basic_auth,
            client_auth = $client_auth, client_cert_headers = $client_cert_headers,
-           no_index = $no_index, captcha_id = $captcha_id, alias_modes = $alias_modes, updated_at = datetime('now')
+           no_index = $no_index, captcha = $captcha, alias_modes = $alias_modes, updated_at = datetime('now')
          WHERE id = $id RETURNING *`,
       )
       .get({ ...toParams(h), id });
@@ -562,81 +528,9 @@ export const basicAuthUsers = {
   },
 };
 
-interface CaptchaRow {
-  id: number;
-  name: string;
-  site_key: string;
-  secret_key: string;
-  lifetime: number;
-  created_at: string;
-  updated_at: string;
-}
-
-const toCaptcha = (r: CaptchaRow): Captcha => ({
-  id: r.id,
-  name: r.name,
-  siteKey: r.site_key,
-  secretKey: r.secret_key,
-  lifetime: r.lifetime,
-  createdAt: r.created_at,
-  updatedAt: r.updated_at,
-});
-
-export type CaptchaInput = Omit<Captcha, "id" | "createdAt" | "updatedAt">;
-
-const captchaParams = (c: CaptchaInput) => ({
-  name: c.name,
-  site_key: c.siteKey,
-  secret_key: c.secretKey,
-  lifetime: c.lifetime,
-});
-
-export const captchas = {
-  list(): Captcha[] {
-    return db.query<CaptchaRow, []>("SELECT * FROM captchas ORDER BY name, id").all().map(toCaptcha);
-  },
-  get(id: number): Captcha | null {
-    const row = db.query<CaptchaRow, [number]>("SELECT * FROM captchas WHERE id = ?").get(id);
-    return row ? toCaptcha(row) : null;
-  },
-  /** The captcha a service asks for, looked up on every request to it; `undefined` if the service doesn't exist. */
-  forHost(hostId: number): Captcha | null | undefined {
-    const row = db
-      .query<CaptchaRow & { host_id: number }, [number]>(
-        `SELECT h.id AS host_id, c.* FROM proxy_hosts h LEFT JOIN captchas c ON c.id = h.captcha_id WHERE h.id = ?`,
-      )
-      .get(hostId);
-    if (!row) return undefined;
-    return row.id === null ? null : toCaptcha(row);
-  },
-  create(c: CaptchaInput): Captcha {
-    return toCaptcha(
-      db
-        .query<CaptchaRow, any>(
-          `INSERT INTO captchas (name, site_key, secret_key, lifetime)
-           VALUES ($name, $site_key, $secret_key, $lifetime) RETURNING *`,
-        )
-        .get(captchaParams(c))!,
-    );
-  },
-  update(id: number, c: CaptchaInput): Captcha | null {
-    const row = db
-      .query<CaptchaRow, any>(
-        `UPDATE captchas SET name = $name, site_key = $site_key, secret_key = $secret_key,
-           lifetime = $lifetime, updated_at = datetime('now')
-         WHERE id = $id RETURNING *`,
-      )
-      .get({ ...captchaParams(c), id });
-    return row ? toCaptcha(row) : null;
-  },
-  /** Throws a SQLite foreign key error while a service still uses the captcha. */
-  delete(id: number): boolean {
-    return db.query("DELETE FROM captchas WHERE id = ?").run(id).changes > 0;
-  },
-};
-
 export type SettingKey =
   | "public_address"
+  | "captcha"
   | "captcha_signing_key"
   | "backend_tag"
   | "rate_limit"

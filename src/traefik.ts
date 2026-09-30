@@ -1,5 +1,6 @@
 import { certificateFor, type CertInfo } from "./certs";
-import { basicAuthUsers, captchas, clientCas, hosts, type ProxyHost } from "./db";
+import { captchaConfig } from "./captcha";
+import { basicAuthUsers, clientCas, hosts, type ProxyHost } from "./db";
 import { rateLimitMiddleware } from "./ratelimit";
 
 // Every service is served over HTTPS with a Let's Encrypt certificate; plain HTTP is redirected by Traefik.
@@ -42,7 +43,7 @@ function minTlsVersion() {
 export const TLS_DEFAULTS = { sniStrict: true, minVersion: minTlsVersion() };
 
 /**
- * How Traefik reaches proxytail, for the captchas' forwardAuth calls: APP_URL_FOR_TRAEFIK, or else the address Traefik
+ * How Traefik reaches proxytail, for the captcha's forwardAuth calls: APP_URL_FOR_TRAEFIK, or else the address Traefik
  * polls the configuration from (http://app:3000 in docker-compose.yml).
  */
 export function appUrlForTraefik(configRequestUrl: string) {
@@ -58,7 +59,7 @@ export function buildConfig(appUrl: string) {
   const tlsOptions: Record<string, unknown> = {};
   const cas = new Map(clientCas.list().map((ca) => [ca.id, ca]));
   const users = new Map(basicAuthUsers.list().map((u) => [u.id, u]));
-  const captchaIds = new Set(captchas.list().map((c) => c.id));
+  const captcha = captchaConfig();
   const rateLimit = rateLimitMiddleware();
 
   for (const h of hosts.list()) {
@@ -104,13 +105,13 @@ export function buildConfig(appUrl: string) {
       }
     }
     // Fail closed as well: a service that asks for a captcha is never published without it.
-    if (h.captchaId !== null && !captchaIds.has(h.captchaId)) {
-      console.error(`Not routing ${h.domains[0]}: its captcha doesn't exist`);
+    if (h.captcha && !captcha) {
+      console.error(`Not routing ${h.domains[0]}: it asks for a captcha, but the captcha isn't set up`);
       continue;
     }
     // Before basic auth, so bots don't get to guess passwords. proxytail answers with the challenge page, or lets the
     // request through when it carries a clearance cookie (see captcha.ts).
-    if (h.captchaId !== null) {
+    if (h.captcha) {
       middlewares[`${name}-captcha`] = {
         forwardAuth: {
           address: `${appUrl}/api/captcha/check/${h.id}`,

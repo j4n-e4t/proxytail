@@ -12,18 +12,22 @@ import {
   type Filters,
   type Range,
 } from "./accesslog";
-import { captchaCheck, checkSecretKey, LIFETIME } from "./captcha";
+import {
+  captchaCheck,
+  captchaConfig,
+  checkSecretKey,
+  LIFETIME,
+  saveCaptchaConfig,
+  type CaptchaConfig,
+} from "./captcha";
 import {
   basicAuthUsers,
-  captchas,
   clientCas,
   domains as domainStore,
   hosts,
   settings,
   type Alias,
   type BasicAuthUser,
-  type Captcha,
-  type CaptchaInput,
   type ClientAuth,
   type ClientCa,
   type ProxyHost,
@@ -187,9 +191,9 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
     for (const id of clientCaIds) if (!clientCas.get(id)) throw new HttpError(400, `Client CA ${id} does not exist`);
   }
 
-  // Existence is checked again atomically when the service is written (see saveHost).
-  const captchaId = raw.captchaId == null ? null : Number(raw.captchaId);
-  if (captchaId !== null && !captchas.get(captchaId)) throw new HttpError(400, `Captcha ${raw.captchaId} does not exist`);
+  const captcha = !!raw.captcha;
+  if (captcha && !existing?.captcha && !captchaConfig())
+    throw new HttpError(400, "Set up the captcha under Security → Captcha first");
 
   return {
     domains,
@@ -207,7 +211,7 @@ async function validateHost(raw: any, existing?: ProxyHost): Promise<ProxyHostIn
     clientCaIds,
     clientCertHeaders: clientAuth !== "off" && !!raw.clientCertHeaders,
     noIndex: !!raw.noIndex,
-    captchaId,
+    captcha,
   };
 }
 
@@ -266,16 +270,13 @@ function domainView(d: ReturnType<typeof domainStore.list>[number]) {
 const isForeignKeyError = (e: unknown) =>
   e instanceof SQLiteError && !!e.code?.startsWith("SQLITE_CONSTRAINT") && e.message.includes("FOREIGN KEY");
 
-/**
- * Writes a service. A CA, user or captcha deleted since validation fails the write instead of being dropped from the
- * service.
- */
+/** Writes a service. A CA or user deleted since validation fails the write instead of being dropped from the service. */
 function saveHost<T>(write: () => T): T {
   try {
     return write();
   } catch (e) {
     if (isForeignKeyError(e))
-      throw new HttpError(409, "One of the selected client CAs, users or captchas no longer exists. Reload and try again.");
+      throw new HttpError(409, "One of the selected client CAs or users no longer exists. Reload and try again.");
     throw e;
   }
 }
@@ -290,25 +291,24 @@ function getCa(raw: string) {
   return ca;
 }
 
-/** Captchas as returned by the API, with the services that ask for them. Secret keys never leave the server. */
-function captchaView(c: Captcha, all = hosts.list()) {
-  const { secretKey: _, ...rest } = c;
-  return { ...rest, hostIds: all.filter((h) => h.captchaId === c.id).map((h) => h.id) };
-}
-
-function getCaptcha(raw: string) {
-  const c = captchas.get(parseId(raw));
-  if (!c) throw new HttpError(404, "Captcha not found");
-  return c;
+/** The captcha as returned by the API, with the services that ask for it. The secret key never leaves the server. */
+function captchaView(all = hosts.list()) {
+  const c = captchaConfig();
+  return {
+    configured: !!c,
+    siteKey: c?.siteKey ?? "",
+    lifetime: c?.lifetime ?? LIFETIME.default,
+    hostIds: all.filter((h) => h.captcha).map((h) => h.id),
+  };
 }
 
 /** Site keys go into the challenge page; Turnstile's are letters, digits, dashes and underscores. */
 const SITE_KEY_RE = /^[\w-]{1,128}$/;
 const SECRET_KEY_RE = /^[\x21-\x7e]{1,256}$/;
 
-/** A new captcha (`existing` undefined), or changes to one. An empty secret key keeps the current one. */
-async function validateCaptcha(raw: Record<string, unknown>, existing?: Captcha): Promise<CaptchaInput> {
-  const name = validateName(raw.name ?? existing?.name, "Name");
+/** The widget's keys and lifetime. An empty secret key keeps the current one. */
+async function validateCaptcha(raw: Record<string, unknown>): Promise<CaptchaConfig> {
+  const existing = captchaConfig();
   const siteKey = String(raw.siteKey ?? existing?.siteKey ?? "").trim();
   if (!SITE_KEY_RE.test(siteKey)) throw new HttpError(400, "Enter the widget's site key from the Cloudflare dashboard");
   const newSecret = typeof raw.secretKey === "string" ? raw.secretKey.trim() : "";
@@ -323,7 +323,7 @@ async function validateCaptcha(raw: Record<string, unknown>, existing?: Captcha)
     const rejected = await checkSecretKey(secretKey);
     if (rejected) throw new HttpError(400, rejected);
   }
-  return { name, siteKey, secretKey, lifetime };
+  return { siteKey, secretKey, lifetime };
 }
 
 function validateName(raw: unknown, what: string) {
@@ -615,34 +615,19 @@ const server = Bun.serve({
       }),
     },
 
-    "/api/captchas": {
-      GET: handle(() => {
-        const all = hosts.list();
-        return json(captchas.list().map((c) => captchaView(c, all)));
+    "/api/captcha": {
+      GET: handle(() => json(captchaView())),
+      PUT: handle(async (req) => {
+        saveCaptchaConfig(await validateCaptcha(await body(req)));
+        return json(captchaView());
       }),
-      POST: handle(async (req) => json(captchaView(captchas.create(await validateCaptcha(await body(req)))), 201)),
-    },
-    "/api/captchas/:id": {
-      // Any of the fields; an empty or missing secret key keeps the current one.
-      PATCH: handle(async (req) => {
-        const c = getCaptcha(req.params.id);
-        return json(captchaView(captchas.update(c.id, await validateCaptcha(await body(req), c))!));
-      }),
-      DELETE: handle((req) => {
-        const c = getCaptcha(req.params.id);
-        const inUse = () => {
-          const used = hosts.list().filter((h) => h.captchaId === c.id);
-          return new HttpError(409, `${c.name} is used by ${used.map((h) => h.domains[0]).join(", ") || "a service"}. Remove it from those services first.`);
-        };
-        if (hosts.list().some((h) => h.captchaId === c.id)) throw inUse();
-        try {
-          captchas.delete(c.id);
-        } catch (e) {
-          // A service started using it since the check above.
-          if (isForeignKeyError(e)) throw inUse();
-          throw e;
-        }
-        return new Response(null, { status: 204 });
+      // Removing the widget would leave the services that ask for it unrouted.
+      DELETE: handle(() => {
+        const used = hosts.list().filter((h) => h.captcha);
+        if (used.length)
+          throw new HttpError(409, `${used.map((h) => h.domains[0]).join(", ")} ask for the captcha. Turn it off there first.`);
+        saveCaptchaConfig(null);
+        return json(captchaView());
       }),
     },
 

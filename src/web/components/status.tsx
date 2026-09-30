@@ -231,7 +231,7 @@ export function CertCell({ host, traefik }: { host: ProxyHost; traefik: TraefikS
 
 export function AccessCell({ host }: { host: ProxyHost }) {
   const names = host.basicAuthUsers.map((u) => u.username);
-  if (host.captchaId !== null && host.clientAuth === "off" && !host.basicAuth)
+  if (host.captcha && host.clientAuth === "off" && !host.basicAuth)
     return <Cell icon={BotOff} label="Captcha" tip="Visitors solve a captcha first." />;
   if (host.clientAuth !== "off") {
     const cas = `${host.clientCaIds.length} ${host.clientCaIds.length === 1 ? "CA" : "CAs"}`;
@@ -239,12 +239,12 @@ export function AccessCell({ host }: { host: ProxyHost }) {
       <Cell
         icon={ShieldCheck}
         label="Client cert"
-        tip={`${host.clientAuth === "require" ? "Required" : "Optional"}, verified against ${cas}${host.captchaId !== null ? "; captcha" : ""}${host.basicAuth ? `; basic auth for ${names.join(", ")}` : ""}`}
+        tip={`${host.clientAuth === "require" ? "Required" : "Optional"}, verified against ${cas}${host.captcha ? "; captcha" : ""}${host.basicAuth ? `; basic auth for ${names.join(", ")}` : ""}`}
       />
     );
   }
   if (!host.basicAuth) return <Cell label="Public" t="muted" />;
   return (
-    <Cell icon={KeyRound} label="Basic auth" tip={`${host.captchaId !== null ? "After a captcha, for " : ""}${names.join(", ")}`} />
+    <Cell icon={KeyRound} label="Basic auth" tip={`${host.captcha ? "After a captcha, for " : ""}${names.join(", ")}`} />
   );
 }

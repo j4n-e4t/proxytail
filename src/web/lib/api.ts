@@ -32,8 +32,8 @@ export interface ProxyHost {
   clientCertHeaders: boolean;
   /** Sends `X-Robots-Tag: noindex, nofollow`. */
   noIndex: boolean;
-  /** The captcha visitors solve before reaching the service, or null. */
-  captchaId: number | null;
+  /** Visitors solve the captcha before reaching the service. */
+  captcha: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -53,7 +53,7 @@ export type ProxyHostDraft = Pick<
   | "clientCaIds"
   | "clientCertHeaders"
   | "noIndex"
-  | "captchaId"
+  | "captcha"
 >;
 
 export interface BasicAuthUser {
@@ -65,25 +65,15 @@ export interface BasicAuthUser {
   hostIds: number[];
 }
 
-/** A Cloudflare Turnstile widget. */
-export interface Captcha {
-  id: number;
-  name: string;
+/** The Cloudflare Turnstile widget services can ask visitors to solve. */
+export interface CaptchaView {
+  /** False until a site key and secret key are saved. */
+  configured: boolean;
   siteKey: string;
   /** Seconds a visitor who solved it is let through before being asked again. */
   lifetime: number;
-  createdAt: string;
-  updatedAt: string;
-  /** Services that ask for this captcha. */
+  /** Services that ask for the captcha. */
   hostIds: number[];
-}
-
-/** A new captcha, or changes to one. An empty secret key keeps the current one. */
-export interface CaptchaDraft {
-  name: string;
-  siteKey: string;
-  secretKey?: string;
-  lifetime: number;
 }
 
 export interface CertSummary {
@@ -317,10 +307,11 @@ export const api = {
   updateBasicAuthUser: (id: number, patch: { username?: string; password?: string }) =>
     request<BasicAuthUser>("PATCH", `/api/basic-auth-users/${id}`, patch),
   deleteBasicAuthUser: (id: number) => request<void>("DELETE", `/api/basic-auth-users/${id}`),
-  captchas: () => request<Captcha[]>("GET", "/api/captchas"),
-  createCaptcha: (c: CaptchaDraft) => request<Captcha>("POST", "/api/captchas", c),
-  updateCaptcha: (id: number, c: Partial<CaptchaDraft>) => request<Captcha>("PATCH", `/api/captchas/${id}`, c),
-  deleteCaptcha: (id: number) => request<void>("DELETE", `/api/captchas/${id}`),
+  captcha: () => request<CaptchaView>("GET", "/api/captcha"),
+  /** An empty or missing secret key keeps the current one. */
+  saveCaptcha: (c: { siteKey: string; secretKey?: string; lifetime: number }) =>
+    request<CaptchaView>("PUT", "/api/captcha", c),
+  removeCaptcha: () => request<CaptchaView>("DELETE", "/api/captcha"),
   detectIp: () => request<{ ip: string }>("POST", "/api/settings/detect-ip"),
   settings: () => request<Settings>("GET", "/api/settings"),
   saveSettings: (s: Record<string, string | null>) => request<Settings>("PUT", "/api/settings", s),

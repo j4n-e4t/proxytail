@@ -1,9 +1,10 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { captchas, hosts, settings, type Captcha } from "./db";
+import { hosts, settings } from "./db";
 
 /**
- * Captchas in front of services, with Cloudflare Turnstile. Traefik asks proxytail about every request to
- * a service with a captcha (a forwardAuth middleware), and proxytail answers:
+ * A captcha in front of services, with Cloudflare Turnstile. There's one widget (Security → Captcha), and each service
+ * turns it on or off. Traefik asks proxytail about every request to a service with the captcha on (a forwardAuth
+ * middleware), and proxytail answers:
  *
  * - with 200, which lets the request through, when it carries a valid clearance cookie;
  * - with a challenge page (403) otherwise. The visitor solves the captcha there, and the page sends the token to
@@ -11,7 +12,7 @@ import { captchas, hosts, settings, type Captcha } from "./db";
  *   checks the token with Cloudflare, sets the clearance cookie and redirects back (303).
  *
  * Nothing but forwardAuth calls reach proxytail, so it stays off the internet. The clearance cookie is signed with a
- * key only proxytail knows, and is valid for one service and captcha, for the captcha's lifetime.
+ * key only proxytail knows, and is valid for one service, for the configured lifetime.
  */
 
 /** Reserved on every service with a captcha: the challenge page sends solved tokens here. */
@@ -21,6 +22,29 @@ const VERIFY_PATH = `${CAPTCHA_PATH}/verify`;
 const COOKIE = "__Host-proxytail-captcha";
 
 export const LIFETIME = { min: 5 * 60, max: 30 * 86_400, default: 86_400 };
+
+/** The Turnstile widget every service with a captcha uses. */
+export interface CaptchaConfig {
+  siteKey: string;
+  /** Cloudflare's secret for verifying solved challenges. Never sent to the browser. */
+  secretKey: string;
+  /** Seconds a visitor who solved it can use a service before being asked again. */
+  lifetime: number;
+}
+
+/** The widget, or null until it's set up. */
+export function captchaConfig(): CaptchaConfig | null {
+  try {
+    const c = JSON.parse(settings.get("captcha") ?? "null");
+    return c?.siteKey && c?.secretKey ? { lifetime: LIFETIME.default, ...c } : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveCaptchaConfig(c: CaptchaConfig | null) {
+  settings.set("captcha", c && JSON.stringify(c));
+}
 
 const VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 const SCRIPT_URL = "https://challenges.cloudflare.com/turnstile/v0/api.js";
@@ -74,22 +98,22 @@ function signingKey(): Buffer {
 
 const sign = (payload: string) => createHmac("sha256", signingKey()).update(payload).digest("base64url");
 
-/** `<host id>.<captcha id>.<expiry, unix seconds>.<signature>` */
-function clearance(hostId: number, c: Captcha, now = Date.now()) {
-  const payload = `${hostId}.${c.id}.${Math.floor(now / 1000) + c.lifetime}`;
+/** `<host id>.<expiry, unix seconds>.<signature>` */
+function clearance(hostId: number, lifetime: number, now = Date.now()) {
+  const payload = `${hostId}.${Math.floor(now / 1000) + lifetime}`;
   return `${payload}.${sign(payload)}`;
 }
 
-function validClearance(value: string | undefined, hostId: number, c: Captcha, now = Date.now()) {
+function validClearance(value: string | undefined, hostId: number, lifetime: number, now = Date.now()) {
   const parts = value?.split(".");
-  if (parts?.length !== 4) return false;
-  const [host, captcha, expiry, signature] = parts as [string, string, string, string];
-  const expected = Buffer.from(sign(`${host}.${captcha}.${expiry}`));
+  if (parts?.length !== 3) return false;
+  const [host, expiry, signature] = parts as [string, string, string];
+  const expected = Buffer.from(sign(`${host}.${expiry}`));
   const given = Buffer.from(signature);
   if (given.length !== expected.length || !timingSafeEqual(given, expected)) return false;
   const secondsLeft = Number(expiry) - now / 1000;
   // A lifetime that was shortened since applies to cookies issued before, too.
-  return Number(host) === hostId && Number(captcha) === c.id && secondsLeft > 0 && secondsLeft <= c.lifetime;
+  return Number(host) === hostId && secondsLeft > 0 && secondsLeft <= lifetime;
 }
 
 function cookieValue(req: Request, name: string) {
@@ -119,7 +143,7 @@ const noStore = { "Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollo
  * The page visitors solve the captcha on, served in place of what they asked for, with status 403: nothing but the
  * widget and a line of text, black or white with the visitor's color scheme.
  */
-function challengePage(c: Captcha, returnTo: string) {
+function challengePage(c: CaptchaConfig, returnTo: string) {
   const nonce = randomBytes(16).toString("base64");
   const csp = [
     "default-src 'none'",
@@ -186,10 +210,13 @@ const blocked = () =>
  * path and client IP in X-Forwarded-* headers, and only its Accept and Cookie headers (see buildConfig).
  */
 export async function captchaCheck(req: Request, hostId: number): Promise<Response> {
-  const c = captchas.forHost(hostId);
-  if (c === undefined) return new Response("Unknown service\n", { status: 404 });
-  // The captcha was removed from the service; Traefik drops this middleware within seconds.
-  if (c === null) return new Response(null, { status: 200 });
+  const service = hosts.get(hostId);
+  if (!service) return new Response("Unknown service\n", { status: 404 });
+  // The captcha was turned off for the service; Traefik drops this middleware within seconds.
+  if (!service.captcha) return new Response(null, { status: 200 });
+  // Fail closed: the widget can't be removed while services use it, but never let requests through without it.
+  const c = captchaConfig();
+  if (!c) return new Response("The captcha isn't set up\n", { status: 503 });
 
   const h = req.headers;
   // Set by Traefik from the request itself: forwardAuth ignores what the client sent (trustForwardHeader is off).
@@ -198,7 +225,7 @@ export async function captchaCheck(req: Request, hostId: number): Promise<Respon
   const uri = h.get("x-forwarded-uri") ?? "/";
   const method = h.get("x-forwarded-method") ?? "GET";
   const clientIp = h.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined;
-  if (!hosts.get(hostId)?.domains.includes(hostname)) return new Response("Unknown hostname\n", { status: 404 });
+  if (!service.domains.includes(hostname)) return new Response("Unknown hostname\n", { status: 404 });
 
   const url = new URL(uri, "https://invalid");
   if (url.pathname === VERIFY_PATH) {
@@ -222,12 +249,12 @@ export async function captchaCheck(req: Request, hostId: number): Promise<Respon
         ...noStore,
         // Absolute: Traefik resolves a relative Location against proxytail's own address.
         Location: `https://${host}${returnTo}`,
-        "Set-Cookie": `${COOKIE}=${clearance(hostId, c)}; Max-Age=${c.lifetime}; Path=/; Secure; HttpOnly; SameSite=Lax`,
+        "Set-Cookie": `${COOKIE}=${clearance(hostId, c.lifetime)}; Max-Age=${c.lifetime}; Path=/; Secure; HttpOnly; SameSite=Lax`,
       },
     });
   }
 
-  if (validClearance(cookieValue(req, COOKIE), hostId, c)) return new Response(null, { status: 200 });
+  if (validClearance(cookieValue(req, COOKIE), hostId, c.lifetime)) return new Response(null, { status: 200 });
   const wantsPage = (method === "GET" || method === "HEAD") && (h.get("accept") ?? "").includes("text/html");
   return wantsPage ? challengePage(c, safeReturn(uri)) : blocked();
 }
