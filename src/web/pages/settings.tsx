@@ -1,15 +1,5 @@
 import { useState, type FormEvent } from "react";
-import {
-  Activity,
-  Check,
-  Copy,
-  ExternalLink,
-  Gauge,
-  Globe,
-  Loader2,
-  Plug,
-  Radar,
-} from "lucide-react";
+import { Check, Copy, ExternalLink, Globe, Loader2, Plug, Radar } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -19,15 +9,14 @@ import { Label } from "@/components/ui/label";
 import { TailscaleIcon, TraefikIcon } from "@/components/brand-icons";
 import { PageHeader } from "@/components/page-header";
 import { ToneBadge } from "@/components/status";
-import { usePoll } from "@/hooks/use-poll";
-import { api, type AccessLogStatus, type Device, type RateLimitView, type Settings, type TraefikStatus } from "@/lib/api";
+import { api, type Device, type Settings, type TraefikStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export type SettingsSection = "general" | "tailscale" | "traefik";
 
 type Tone = "success" | "warning" | "danger" | "muted";
 
-/** The state of one system proxytail drives, for its tile. */
+/** The state of one system proxytail drives, for its sidebar entry. */
 interface Health {
   tone: Tone;
   state: string;
@@ -83,29 +72,8 @@ function traefikHealth(traefik: TraefikStatus | null): Health {
   };
 }
 
-function rateLimitHealth(view: RateLimitView | null): Health {
-  if (!view) return { tone: "muted", state: "…" };
-  if (!view.config.enabled) return { tone: "muted", state: "Off" };
-  if (view.traefik?.errors.length) return { tone: "danger", state: "Traefik error", detail: view.traefik.errors[0] };
-  const rate = `${view.config.average} per ${{ "1s": "second", "1m": "minute", "1h": "hour" }[view.config.period]}`;
-  if (view.config.store === "valkey") {
-    const v = view.valkey;
-    if (view.activeStore !== "valkey") return { tone: "warning", state: "Valkey down", detail: "Counting in Traefik's memory" };
-    return { tone: "success", state: `${v?.server ?? "Valkey"} ${v?.version ? `v${v.version}` : ""}`.trim(), detail: rate };
-  }
-  return { tone: "success", state: "In Traefik's memory", detail: rate };
-}
-
-function requestLogHealth(status: AccessLogStatus | null): Health {
-  if (!status) return { tone: "muted", state: "…" };
-  if (status.state === "error") return { tone: "danger", state: "Error", detail: status.error };
-  const stored = `${status.entries.toLocaleString()} stored, ${status.retentionDays} days`;
-  if (status.state === "missing") return { tone: "warning", state: "No log yet", detail: stored };
-  if (status.truncateError) return { tone: "warning", state: "Can't empty the file", detail: stored };
-  return { tone: "success", state: "Reading", detail: stored };
-}
-
-function StatusTile(props: {
+/** A Settings section in the page's sidebar, with the state of the system it configures. */
+function SectionLink(props: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
   health: Health;
@@ -116,23 +84,22 @@ function StatusTile(props: {
   return (
     <button
       onClick={props.onClick}
+      aria-current={props.active ? "page" : undefined}
       className={cn(
-        "flex min-w-0 items-start gap-3 rounded-xl border bg-card p-4 text-left shadow-xs transition-colors hover:bg-muted/40",
-        props.active && "border-primary/40 ring-1 ring-primary/30",
+        "flex shrink-0 items-center gap-3 md:w-full rounded-lg px-3 py-2 text-left transition-colors",
+        props.active ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
       )}
     >
-      <div className="relative flex size-9 shrink-0 items-center justify-center rounded-lg border bg-background">
-        <Icon className="size-4 text-foreground/80" />
-        <Dot tone={props.health.tone} className="absolute -right-0.5 -bottom-0.5 ring-2 ring-card" />
+      <div className="relative flex size-8 shrink-0 items-center justify-center rounded-md border bg-background">
+        <Icon className={cn("size-4", props.active ? "text-primary" : "text-foreground/80")} />
+        <Dot tone={props.health.tone} className="absolute -right-0.5 -bottom-0.5 ring-2 ring-background" />
       </div>
       <div className="min-w-0 leading-tight">
-        <p className="text-xs text-muted-foreground">{props.label}</p>
-        <p className="mt-0.5 truncate text-sm font-medium">{props.health.state}</p>
-        {props.health.detail && (
-          <p className="mt-0.5 truncate text-xs text-muted-foreground" title={props.health.detail}>
-            {props.health.detail}
-          </p>
-        )}
+        <p className="text-sm font-medium">{props.label}</p>
+        {/* Narrow screens list the sections in a row, with just their dot. */}
+        <p className="mt-0.5 hidden truncate text-xs text-muted-foreground md:block" title={props.health.detail ?? props.health.state}>
+          {props.health.state}
+        </p>
       </div>
     </button>
   );
@@ -432,21 +399,16 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ComponentType<
   { id: "traefik", label: "Traefik", icon: TraefikIcon },
 ];
 
-/** The sidebar picks the section; the tiles above it show the state of everything proxytail drives. */
+/** Its own sidebar picks the section, and shows the state of the system each one configures. */
 export function SettingsPage(props: {
   section: SettingsSection;
   onSection: (s: SettingsSection) => void;
-  onOpenRateLimiting: () => void;
-  onOpenRequests: () => void;
   settings: Settings;
   traefik: TraefikStatus | null;
   devices: Device[] | null;
   devicesError: string | null;
   onSaved: (s: Settings) => void;
 }) {
-  const rateLimit = usePoll(api.rateLimit, 15_000);
-  const accessLog = usePoll(api.accessLog, 15_000);
-
   const health: Record<SettingsSection, Health> = {
     general: props.settings.publicAddress
       ? { tone: "success", state: props.settings.publicAddress }
@@ -457,54 +419,41 @@ export function SettingsPage(props: {
 
   const section = props.section;
   const current = SECTIONS.find((s) => s.id === section)!;
-  const tile = (id: SettingsSection) => {
-    const s = SECTIONS.find((x) => x.id === id)!;
-    return (
-      <StatusTile
-        icon={s.icon}
-        label={s.label}
-        health={health[id]}
-        active={section === id}
-        onClick={() => props.onSection(id)}
-      />
-    );
-  };
 
   return (
     <>
-      <PageHeader title="Settings" description="The systems proxytail drives, and how it handles your traffic." />
+      <PageHeader title="Settings" description="The systems proxytail drives." />
 
-      <div className="mb-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {tile("tailscale")}
-        {tile("traefik")}
-        <StatusTile
-          icon={Gauge}
-          label="Rate limiting"
-          health={rateLimitHealth(rateLimit.data)}
-          active={false}
-          onClick={props.onOpenRateLimiting}
-        />
-        <StatusTile
-          icon={Activity}
-          label="Request log"
-          health={requestLogHealth(accessLog.data)}
-          active={false}
-          onClick={props.onOpenRequests}
-        />
+      <div className="flex flex-col gap-6 md:flex-row md:items-start md:gap-8">
+        <nav
+          aria-label="Settings sections"
+          className="-mx-1 flex gap-1 overflow-x-auto px-1 md:sticky md:top-8 md:mx-0 md:w-56 md:shrink-0 md:flex-col md:overflow-visible md:px-0"
+        >
+          {SECTIONS.map((s) => (
+            <SectionLink
+              key={s.id}
+              icon={s.icon}
+              label={s.label}
+              health={health[s.id]}
+              active={section === s.id}
+              onClick={() => props.onSection(s.id)}
+            />
+          ))}
+        </nav>
+
+        <section aria-label={current.label} className="grid min-w-0 max-w-3xl flex-1 grid-cols-1 gap-6">
+          {section === "general" && <PublicAddressCard settings={props.settings} onSaved={props.onSaved} />}
+          {section === "tailscale" && (
+            <TailscaleCard
+              settings={props.settings}
+              health={health.tailscale}
+              devicesError={props.devicesError}
+              onSaved={props.onSaved}
+            />
+          )}
+          {section === "traefik" && <TraefikCard traefik={props.traefik} health={health.traefik} />}
+        </section>
       </div>
-
-      <section aria-label={current.label} className="grid max-w-4xl grid-cols-1 gap-6">
-        {section === "general" && <PublicAddressCard settings={props.settings} onSaved={props.onSaved} />}
-        {section === "tailscale" && (
-          <TailscaleCard
-            settings={props.settings}
-            health={health.tailscale}
-            devicesError={props.devicesError}
-            onSaved={props.onSaved}
-          />
-        )}
-        {section === "traefik" && <TraefikCard traefik={props.traefik} health={health.traefik} />}
-      </section>
     </>
   );
 }

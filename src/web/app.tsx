@@ -15,7 +15,6 @@ import {
   Sun,
   Waypoints,
 } from "lucide-react";
-import { TailscaleIcon, TraefikIcon } from "@/components/brand-icons";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -70,10 +69,10 @@ function useRoute() {
 
 type NavIcon = React.ComponentType<{ className?: string }>;
 
-/** A sidebar entry: a page, or a section of the Settings page. */
+/** A sidebar entry. */
 interface NavEntry {
-  /** `page` or `settings/<section>`: also the hash it opens. */
-  target: string;
+  /** The page, also the hash it opens. */
+  target: Page;
   label: string;
   icon: NavIcon;
   count?: number;
@@ -120,9 +119,9 @@ function NavItem(props: { item: NavEntry; active: boolean; onClick: () => void }
 function NavGroup(props: {
   group: NavGroupDef;
   open: boolean;
-  active: string;
+  active: Page;
   onToggle: () => void;
-  onNavigate: (target: string) => void;
+  onNavigate: (target: Page) => void;
 }) {
   const { group, open } = props;
   return (
@@ -236,19 +235,7 @@ function Console() {
         { target: "requests", label: "Requests", icon: Activity },
       ],
     },
-    {
-      id: "settings",
-      label: "Settings",
-      items: [
-        { target: "settings", label: "General", icon: SlidersHorizontal },
-        { target: "settings/tailscale", label: "Tailscale", icon: TailscaleIcon },
-        { target: "settings/traefik", label: "Traefik", icon: TraefikIcon },
-      ],
-    },
   ];
-  // The entry for the current page: Settings sections have their own, General is plain `settings`.
-  const activeTarget =
-    page === "settings" ? (isSettingsSection(route.sub) && route.sub !== "general" ? `settings/${route.sub}` : "settings") : page;
 
   const [collapsed, setCollapsed] = useState<string[]>(loadCollapsed);
   const toggleGroup = (id: string) =>
@@ -262,12 +249,12 @@ function Console() {
       return next;
     });
   // Navigating into a collapsed group (e.g. from a link on a page) opens it, so the current page is always visible.
-  const activeGroup = navGroups.find((g) => g.items.some((i) => i.target === activeTarget))?.id;
+  const activeGroup = navGroups.find((g) => g.items.some((i) => i.target === page))?.id;
   useEffect(() => {
     if (activeGroup && collapsed.includes(activeGroup)) toggleGroup(activeGroup);
     // Only when the page changes, so collapsing the current group by hand sticks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTarget]);
+  }, [page]);
 
   const refreshHosts = () => {
     hosts.reload();
@@ -296,14 +283,20 @@ function Console() {
               key={g.id}
               group={g}
               open={!collapsed.includes(g.id)}
-              active={activeTarget}
+              active={page}
               onToggle={() => toggleGroup(g.id)}
               onNavigate={navigate}
             />
           ))}
         </nav>
 
-        <div className="border-t p-3">
+        <div className="space-y-1 border-t p-3">
+          {/* Settings has its own sidebar for its sections, so it's a single entry here. */}
+          <NavItem
+            item={{ target: "settings", label: "Settings", icon: SlidersHorizontal }}
+            active={page === "settings"}
+            onClick={() => setPage("settings")}
+          />
           <div className="flex items-center justify-between px-3 py-1">
             <span className="text-xs text-muted-foreground">Theme</span>
             <ToggleGroup
@@ -398,8 +391,6 @@ function Console() {
             <SettingsPage
               section={isSettingsSection(route.sub) ? route.sub : "general"}
               onSection={(s) => navigate(s === "general" ? "settings" : `settings/${s}`)}
-              onOpenRateLimiting={() => setPage("rate-limiting")}
-              onOpenRequests={() => setPage("requests")}
               settings={settings.data}
               traefik={traefik.data}
               devices={devices.data}
