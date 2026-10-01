@@ -5,7 +5,6 @@ import {
   ChevronDown,
   Gauge,
   Globe,
-  KeyRound,
   Monitor,
   MonitorSmartphone,
   Moon,
@@ -24,7 +23,6 @@ import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import { useTheme, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
-import { BasicAuthUsersPage } from "@/pages/basic-auth-users";
 import { ClientCasPage } from "@/pages/client-cas";
 import { PeersPage } from "@/pages/peers";
 import { RateLimitingPage } from "@/pages/rate-limiting";
@@ -35,8 +33,8 @@ import { HostsPage } from "@/pages/hosts";
 import { isSettingsSection, SettingsPage } from "@/pages/settings";
 import "./globals.css";
 
-type Page = "services" | "requests" | "domains" | "client-cas" | "users" | "peers" | "rate-limiting" | "settings";
-const PAGES: Page[] = ["services", "requests", "domains", "client-cas", "users", "peers", "rate-limiting", "settings"];
+type Page = "services" | "requests" | "domains" | "client-cas" | "peers" | "rate-limiting" | "settings";
+const PAGES: Page[] = ["services", "requests", "domains", "client-cas", "peers", "rate-limiting", "settings"];
 
 interface Route {
   page: Page;
@@ -202,7 +200,6 @@ function Console() {
   const settings = usePoll(api.settings, 30_000);
   const domains = usePoll(api.domains, 0);
   const clientCas = usePoll(api.clientCas, 0);
-  const users = usePoll(api.basicAuthUsers, 0);
   const traefik = usePoll(api.traefik, 5000);
   const devices = usePoll(
     useCallback(() => api.devices(), []),
@@ -223,7 +220,6 @@ function Console() {
       id: "security",
       label: "Security",
       items: [
-        { target: "users", label: "Basic auth users", icon: KeyRound, count: users.data?.length },
         { target: "client-cas", label: "Client CAs", icon: ShieldCheck, count: clientCas.data?.length },
         { target: "rate-limiting", label: "Rate limiting", icon: Gauge },
       ],
@@ -260,7 +256,6 @@ function Console() {
     hosts.reload();
     domains.reload();
     clientCas.reload();
-    users.reload();
     traefik.reload();
   };
 
@@ -363,17 +358,6 @@ function Console() {
               onOpenService={(id) => navigate(`services/${id}`)}
             />
           )}
-          {page === "users" && (
-            <BasicAuthUsersPage
-              users={users.data}
-              hosts={hosts.data ?? []}
-              onChanged={() => {
-                users.reload();
-                hosts.reload();
-              }}
-              onOpenService={(id) => navigate(`services/${id}`)}
-            />
-          )}
           {page === "peers" && (
             <PeersPage
               devices={devices.data}
@@ -414,11 +398,9 @@ function Console() {
         peerTag={settings.data?.backendTag ?? ""}
         domains={domains.data}
         clientCas={clientCas.data}
-        basicAuthUsers={users.data}
         traefik={traefik.data}
         onOpenDomains={() => setPage("domains")}
         onOpenClientCas={() => setPage("client-cas")}
-        onOpenUsers={() => setPage("users")}
         onCancel={() => setPage("services")}
         onSaved={() => {
           refreshHosts();

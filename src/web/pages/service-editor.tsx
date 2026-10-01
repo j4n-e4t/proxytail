@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { ArrowRight, Globe, KeyRound, Loader2, Plus, ShieldCheck, X } from "lucide-react";
+import { ArrowRight, Globe, Loader2, Plus, ShieldCheck, X } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,6 @@ import { DevicePicker } from "@/components/device-picker";
 import { ServiceIcon, serviceState } from "@/components/status";
 import {
   api,
-  type BasicAuthUser,
   type ClientAuth,
   type ClientCa,
   type Device,
@@ -32,11 +31,9 @@ interface EditorProps {
   peerTag: string;
   domains: Domain[] | null;
   clientCas: ClientCa[] | null;
-  basicAuthUsers: BasicAuthUser[] | null;
   traefik: TraefikStatus | null;
   onOpenDomains: () => void;
   onOpenClientCas: () => void;
-  onOpenUsers: () => void;
   onCancel: () => void;
   onSaved: () => void;
 }
@@ -48,7 +45,6 @@ export function ServiceEditorDialog(
   const loading =
     props.domains === null ||
     props.clientCas === null ||
-    props.basicAuthUsers === null ||
     (props.hostId !== null && props.hosts === null);
   const existing = props.hostId !== null ? props.hosts?.find((h) => h.id === props.hostId) : undefined;
   return (
@@ -73,7 +69,6 @@ export function ServiceEditorDialog(
             {...props}
             domains={props.domains!}
             clientCas={props.clientCas!}
-            basicAuthUsers={props.basicAuthUsers!}
             existing={existing ?? null}
           />
         )}
@@ -129,7 +124,6 @@ function ServiceForm(
   props: EditorProps & {
     domains: Domain[];
     clientCas: ClientCa[];
-    basicAuthUsers: BasicAuthUser[];
     existing: ProxyHost | null;
     initialDeviceId?: string;
   },
@@ -150,8 +144,6 @@ function ServiceForm(
   const [scheme, setScheme] = useState<"http" | "https">(existing?.scheme ?? "http");
   const [skipVerify, setSkipVerify] = useState(existing?.insecureSkipVerify ?? false);
   const [enabled, setEnabled] = useState(existing?.enabled ?? true);
-  const [basicAuth, setBasicAuth] = useState(existing?.basicAuth ?? false);
-  const [userIds, setUserIds] = useState<number[]>(existing?.basicAuthUserIds ?? []);
   const [clientAuth, setClientAuth] = useState<ClientAuth>(existing?.clientAuth ?? "off");
   // Preselect the only CA, the common case.
   const [caIds, setCaIds] = useState<number[]>(() =>
@@ -176,11 +168,6 @@ function ServiceForm(
 
   const setRow = (i: number, patch: Partial<DomainRow>) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
-  const toggleBasicAuth = (on: boolean) => {
-    setBasicAuth(on);
-    // Preselect the only user, the common case.
-    if (on && !userIds.length && props.basicAuthUsers.length === 1) setUserIds([props.basicAuthUsers[0]!.id]);
-  };
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -193,7 +180,6 @@ function ServiceForm(
     if (rows.some((r) => !r.base)) return invalid("domains", "Pick a domain for the hostname and every alias.");
     if (!deviceId) return invalid("target", "Pick the tailnet peer that runs this service.");
     if (!port) return invalid("target", "Enter the port your service is listening on.");
-    if (basicAuth && !userIds.length) return invalid("auth", "Pick at least one user who can sign in.");
     if (clientAuth !== "off" && !caIds.length)
       return invalid("auth", "Pick a CA to verify client certificates against.");
     const draft: ProxyHostDraft = {
@@ -204,8 +190,6 @@ function ServiceForm(
       scheme,
       insecureSkipVerify: scheme === "https" && skipVerify,
       enabled,
-      basicAuth,
-      basicAuthUserIds: basicAuth ? userIds : [],
       clientAuth,
       clientCaIds: clientAuth === "off" ? [] : caIds,
       clientCertHeaders: clientAuth !== "off" && certHeaders,
@@ -307,7 +291,7 @@ function ServiceForm(
             <TabsTrigger value="target">Target</TabsTrigger>
             <TabsTrigger value="auth">
               Authentication
-              {(basicAuth || clientAuth !== "off") && <span className="size-1.5 rounded-full bg-primary" aria-label="on" />}
+              {clientAuth !== "off" && <span className="size-1.5 rounded-full bg-primary" aria-label="on" />}
             </TabsTrigger>
             <TabsTrigger value="advanced">
               Advanced
@@ -448,53 +432,6 @@ function ServiceForm(
           </TabsContent>
 
           <TabsContent value="auth" className="space-y-5">
-
-            <Section
-              title="Basic auth"
-              description="Ask visitors for a username and password. Credentials are stripped before reaching the service."
-              action={<Switch checked={basicAuth} onCheckedChange={toggleBasicAuth} aria-label="Require basic auth" />}
-            >
-              {basicAuth &&
-                (props.basicAuthUsers.length === 0 ? (
-                  <div className="flex items-center justify-between gap-4 rounded-lg border border-dashed p-4">
-                    <p className="text-sm text-muted-foreground">You haven't added a user yet.</p>
-                    <Button type="button" variant="outline" size="sm" onClick={props.onOpenUsers}>
-                      <KeyRound /> Manage users
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <Label>Who can sign in</Label>
-                    <div className="divide-y rounded-lg border">
-                      {props.basicAuthUsers.map((u) => {
-                        const id = `user-${u.id}`;
-                        return (
-                          <label key={u.id} htmlFor={id} className="flex cursor-pointer items-center gap-3 px-3 py-2.5">
-                            <Checkbox
-                              id={id}
-                              checked={userIds.includes(u.id)}
-                              onCheckedChange={(v) =>
-                                setUserIds((ids) => (v === true ? [...ids, u.id] : ids.filter((x) => x !== u.id)))
-                              }
-                            />
-                            <span className="min-w-0 flex-1 truncate font-mono text-sm">{u.username}</span>
-                            <span className="text-xs text-muted-foreground">
-                              {u.hostIds.length} {u.hostIds.length === 1 ? "service" : "services"}
-                            </span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      A user's password is the same on every service they can sign in to.{" "}
-                      <button type="button" className="underline" onClick={props.onOpenUsers}>
-                        Manage users
-                      </button>
-                    </p>
-                  </div>
-                ))}
-            </Section>
-
             <Section
               title="Client certificates"
               description="Traefik asks visitors for a certificate signed by one of your CAs before any request reaches the service."

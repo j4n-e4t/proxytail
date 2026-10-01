@@ -64,8 +64,8 @@ Then, in the UI:
    route goes live within about 5 seconds. The list
    shows each service's last 24 hours (requests per hour, 5xx rate, 95th percentile response time) and the days left
    on its certificate, turning orange below 21 days and red below 7: Traefik renews at 30.
-4. Optionally, **Security → Basic auth users** or **Client CAs:** ask for a password or a client certificate before a
-   service. See [Basic auth](#basic-auth) and [Client certificates (mTLS)](#client-certificates-mtls).
+4. Optionally, **Security → Client CAs:** ask for a client certificate before a service. See
+   [Client certificates (mTLS)](#client-certificates-mtls).
 5. Optionally, **Security → Rate limiting:** limit how many requests each client IP can make. See
    [Rate limiting](#rate-limiting).
 6. **Requests:** watch the traffic your services get, or pick **View requests** in a service's menu.
@@ -93,25 +93,6 @@ certificate requirement and HSTS. Requests to either count towards the service o
 Services created with several hostnames keep the first one, and the others become parallel aliases. Unlike before,
 the service now sees its own hostname for those, instead of the alias.
 
-## Basic auth
-
-Users are managed on their own page, **Security → Basic auth users**, and attached to services, like client CAs:
-
-1. **Basic auth users:** add a username and a password (at least 8 characters). Passwords are stored as bcrypt hashes
-   and can't be shown again.
-2. **Services:** turn on **Basic auth** in the Authentication tab and check who can sign in.
-
-A user has the same password on every service they're attached to, so changing it there changes it everywhere. Traefik
-strips the credentials before the request reaches the service.
-
-- A user who can still sign in to a service can't be deleted, and a service can't be saved with a user that no longer
-  exists. The database enforces both.
-- Should a service with basic auth ever end up without users anyway, proxytail fails closed: it doesn't route the
-  service, and the UI shows it as **Not routed**.
-- Users from before, when every service had its own, became shared users. The same username with the same password
-  hash became one user; same-named users with different passwords stay separate, since their passwords can't be
-  compared. Give one of them a new password and attach it instead, then delete the others.
-
 ## Client certificates (mTLS)
 
 A service can require visitors to present a client certificate. Traefik checks it during the TLS handshake, before a
@@ -137,10 +118,14 @@ certificates.
 - A client can't get around the check by sending a different SNI name than the `Host` header, e.g. the name of a
   service without client certificates: Traefik answers `421 Misdirected Request` when their TLS options differ.
 
+Client certificates are the only way to protect a service: basic auth was removed. Services that used it are turned off
+when the app starts, unless they also required a client certificate, since they would otherwise be public; the app's log
+names each one. Require a client certificate for them, or turn them back on to make them public.
+
 ## Hiding from search engines
 
 **Hide from search engines**, under **Advanced** in a service's editor, sends `X-Robots-Tag: noindex, nofollow` with
-every response, including the `401` of basic auth and the `429` of rate limiting, so well-behaved crawlers don't list
+every response, including the `429` of rate limiting, so well-behaved crawlers don't list
 the service. It doesn't keep anyone out.
 
 ## Hardening
@@ -167,9 +152,10 @@ the service. It doesn't keep anyone out.
 
 The `crowdsec` branch isn't published to GHCR yet, so the migration builds the app on the proxy host.
 `scripts/migrate-from-main.sh` moves a running `main` stack over. Your services, domains, client CAs,
-settings and Let's Encrypt certificates stay in the same volumes, and nothing is reissued. Basic auth users become
-shared users on the first start (see [Basic auth](#basic-auth)); the database keeps them the way `main` stores them
-too, so `main` still runs on it after a rollback, with the users from before the migration.
+settings and Let's Encrypt certificates stay in the same volumes, and nothing is reissued. Services with basic auth
+are turned off on the first start, unless they also require a client certificate (see
+[Client certificates](#client-certificates-mtls)). The database keeps their users the way `main` stores them, so `main`
+still runs on it after a rollback; turn those services back on there.
 
 ```sh
 cd /path/to/proxytail            # the checkout main's stack was started from, with its .env
@@ -222,23 +208,22 @@ It stops before touching the running stack if anything is missing, and then:
 6. deletes the CrowdSec volumes once no container uses them, after asking. `--yes` deletes them without asking,
    `--keep-volumes` keeps them; without a terminal to ask on, they're kept.
 
-The database is upgraded when the app starts: CrowdSec's settings are removed, and basic auth users become shared
-users (see [Basic auth](#basic-auth)). Traefik's existing access log, which CrowdSec read, is imported into the Requests
+The database is upgraded when the app starts: CrowdSec's settings are removed, and services with basic auth are turned
+off unless they also require a client certificate (see [Client certificates](#client-certificates-mtls)). Traefik's existing access log, which CrowdSec read, is imported into the Requests
 page, keeping only time, client IP, hostname, status and response time, and then emptied.
 
 To go back, run `scripts/migrate-from-crowdsec.sh rollback` **before** checking out the earlier commit. It stops the
 stack, restores the CrowdSec volumes from the backup if they were deleted, and restores `.env`. Then run e.g.
 `git checkout a77c83c && docker compose up -d --remove-orphans` (with `docker login dhi.io` first if its Traefik image
-is a Docker Hardened Image that isn't on the host). The earlier commit runs on the upgraded database, with the users
-from before the migration. Its CrowdSec settings are gone: proxytail registers with CrowdSec again by itself, but turn
+is a Docker Hardened Image that isn't on the host). The earlier commit runs on the upgraded database, with the basic
+auth users from before the migration; turn the services that used them back on. Its CrowdSec settings are gone: proxytail registers with CrowdSec again by itself, but turn
 **Block banned IPs** back on and re-enter the IPs to never block under **Settings → CrowdSec**.
 
 ## Rate limiting
 
 Rate limiting is off until you turn on **Limit requests** under **Security → Rate limiting**. Then every service gets
-Traefik's [rateLimit](https://doc.traefik.io/traefik/middlewares/http/ratelimit/) middleware as its first middleware,
-before basic auth, so it also slows down password guessing. Requests over the limit get `429 Too Many Requests` with a
-`Retry-After` header.
+Traefik's [rateLimit](https://doc.traefik.io/traefik/middlewares/http/ratelimit/) middleware as its first middleware.
+Requests over the limit get `429 Too Many Requests` with a `Retry-After` header.
 
 - **Per client IP and service:** each service has its own middleware, so a client that hits the limit on one service
   can still use the others. Clients are told apart by their address as Traefik sees it. Docker's published ports keep
@@ -315,15 +300,14 @@ at the network layer. That's a deliberate trade-off for personal and homelab set
 ]
 ```
 
-- **Traefik's API is unauthenticated** (routers, services, basic auth hashes), so it's only reachable on the Docker
+- **Traefik's API is unauthenticated** (routers, services, client CA certificates), so it's only reachable on the Docker
   network, like `/api/traefik/config`.
 - **Valkey has no password** and is only reachable on the Docker network. It only holds rate limit counters.
 - **The request log holds client IPs,** which are personal data, with the hostname, status and response time of each
   request. It stays in proxytail's database for the retention you set, and anyone who can open the UI can read it.
 
-Traefik can reach the internet (it needs to for Let's Encrypt), and it holds the certificates and basic auth hashes it
-serves. Client CAs are stored as certificates only, without keys, so neither proxytail nor Traefik can mint client
-certificates.
+Traefik can reach the internet (it needs to for Let's Encrypt), and it holds the certificates it serves. Client CAs
+are stored as certificates only, without keys, so neither proxytail nor Traefik can mint client certificates.
 
 ## Development
 

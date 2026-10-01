@@ -30,9 +30,6 @@ db.run(`
 `);
 // Columns added after the initial release.
 const hostColumns = db.query<{ name: string }, []>("PRAGMA table_info(proxy_hosts)").all().map((c) => c.name);
-if (!hostColumns.includes("basic_auth")) {
-  db.run("ALTER TABLE proxy_hosts ADD COLUMN basic_auth INTEGER NOT NULL DEFAULT 0");
-}
 // Every hostname after the first became an alias, served in parallel unless set otherwise.
 if (!hostColumns.includes("alias_modes")) {
   db.run("ALTER TABLE proxy_hosts ADD COLUMN alias_modes TEXT NOT NULL DEFAULT '{}'");
@@ -96,52 +93,22 @@ db.run(`
   )
 `);
 
-// Basic auth users, shared by the services they're attached to. `hash` is an htpasswd-compatible bcrypt hash. Usernames
-// are unique, except for users migrated from services that each had their own user of the same name.
-const hadUserTables = !!db
-  .query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'host_basic_auth_users'")
-  .get();
-db.transaction(() => {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS basic_auth_users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT NOT NULL,
-      hash TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
-  // Which users can sign in to a service. Like CAs, a user that's in use can't be deleted, so no service is left with
-  // basic auth on and nobody to let in.
-  db.run(`
-    CREATE TABLE IF NOT EXISTS host_basic_auth_users (
-      host_id INTEGER NOT NULL REFERENCES proxy_hosts(id) ON DELETE CASCADE,
-      user_id INTEGER NOT NULL REFERENCES basic_auth_users(id) ON DELETE RESTRICT,
-      PRIMARY KEY (host_id, user_id)
-    )
-  `);
-  if (hadUserTables || !hostColumns.includes("basic_auth_users")) return;
-  // Users used to be stored per service, in basic_auth_users. Each becomes a shared user, attached to its service if
-  // basic auth is on there; the same username with the same hash (e.g. a copied service) becomes one user. Passwords
-  // can't be compared otherwise, so same-named users with different hashes stay separate. The old column is left as it
-  // was, so main still runs on this database after a rollback, with the users from before.
-  const rows = db
-    .query<{ id: number; basic_auth: number; basic_auth_users: string }, []>(
-      "SELECT id, basic_auth, basic_auth_users FROM proxy_hosts",
+// Basic auth was removed: services are protected with client certificates only. Its columns and tables stay where they
+// exist, so main still runs on this database after a rollback. A service that relied on basic auth would now be public,
+// so it's turned off instead, unless it also requires a client certificate. Saving a service clears its basic auth
+// flag, so one turned back on stays on.
+const hasBasicAuthColumn = hostColumns.includes("basic_auth");
+if (hasBasicAuthColumn) {
+  const exposed = db
+    .query<{ domains: string }, []>(
+      "UPDATE proxy_hosts SET enabled = 0 WHERE basic_auth = 1 AND enabled = 1 AND client_auth != 'require' RETURNING domains",
     )
     .all();
-  const find = db.query<{ id: number }, [string, string]>("SELECT id FROM basic_auth_users WHERE username = ? AND hash = ?");
-  const insert = db.query<{ id: number }, [string, string]>(
-    "INSERT INTO basic_auth_users (username, hash) VALUES (?, ?) RETURNING id",
-  );
-  const link = db.query("INSERT OR IGNORE INTO host_basic_auth_users (host_id, user_id) VALUES (?, ?)");
-  for (const row of rows) {
-    for (const u of JSON.parse(row.basic_auth_users) as { username: string; hash: string }[]) {
-      const id = (find.get(u.username, u.hash) ?? insert.get(u.username, u.hash)!).id;
-      if (row.basic_auth) link.run(row.id, id);
-    }
-  }
-})();
+  for (const h of exposed)
+    console.warn(
+      `Turned off ${JSON.parse(h.domains)[0]}: it used basic auth, which proxytail no longer supports. Require a client certificate, or turn it back on to make it public.`,
+    );
+}
 
 export type Scheme = "http" | "https";
 
@@ -163,15 +130,6 @@ export interface Alias {
 }
 
 
-/** A basic auth user; `hash` is an htpasswd-compatible bcrypt hash. */
-export interface BasicAuthUser {
-  id: number;
-  username: string;
-  hash: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface ProxyHost {
   id: number;
   /** Every hostname: the service's own first, then its aliases. */
@@ -185,9 +143,6 @@ export interface ProxyHost {
   scheme: Scheme;
   insecureSkipVerify: boolean;
   enabled: boolean;
-  basicAuth: boolean;
-  /** The users who can sign in, when `basicAuth` is on. */
-  basicAuthUserIds: number[];
   clientAuth: ClientAuth;
   clientCaIds: number[];
   /** Forward the verified client certificate's details to the service in X-Forwarded-Tls-Client-Cert-Info. */
@@ -210,7 +165,6 @@ interface ProxyHostRow {
   scheme: Scheme;
   insecure_skip_verify: number;
   enabled: number;
-  basic_auth: number;
   client_auth: ClientAuth;
   client_cert_headers: number;
   no_index: number;
@@ -221,24 +175,19 @@ interface ProxyHostRow {
 
 type Links = Map<number, number[]>;
 
-/** Ids of a join table's other side, per host id. */
-function linksOf(table: "host_client_cas" | "host_basic_auth_users", column: "ca_id" | "user_id", hostId?: number): Links {
-  const select = `SELECT host_id, ${column} AS id FROM ${table}`;
+/** Ids of the CAs each service trusts, per host id. */
+function caLinks(hostId?: number): Links {
+  const select = "SELECT host_id, ca_id AS id FROM host_client_cas";
   const rows =
     hostId === undefined
-      ? db.query<{ host_id: number; id: number }, []>(`${select} ORDER BY ${column}`).all()
-      : db.query<{ host_id: number; id: number }, [number]>(`${select} WHERE host_id = ? ORDER BY ${column}`).all(hostId);
+      ? db.query<{ host_id: number; id: number }, []>(`${select} ORDER BY ca_id`).all()
+      : db.query<{ host_id: number; id: number }, [number]>(`${select} WHERE host_id = ? ORDER BY ca_id`).all(hostId);
   const links: Links = new Map();
   for (const r of rows) links.set(r.host_id, [...(links.get(r.host_id) ?? []), r.id]);
   return links;
 }
 
-const allLinks = (hostId?: number) => ({
-  cas: linksOf("host_client_cas", "ca_id", hostId),
-  users: linksOf("host_basic_auth_users", "user_id", hostId),
-});
-
-function toHost(r: ProxyHostRow, links = allLinks(r.id)): ProxyHost {
+function toHost(r: ProxyHostRow, cas = caLinks(r.id)): ProxyHost {
   const domains: string[] = JSON.parse(r.domains);
   const modes: Record<string, AliasMode> = JSON.parse(r.alias_modes);
   return {
@@ -252,10 +201,8 @@ function toHost(r: ProxyHostRow, links = allLinks(r.id)): ProxyHost {
     scheme: r.scheme,
     insecureSkipVerify: !!r.insecure_skip_verify,
     enabled: !!r.enabled,
-    basicAuth: !!r.basic_auth,
-    basicAuthUserIds: links.users.get(r.id) ?? [],
     clientAuth: r.client_auth,
-    clientCaIds: links.cas.get(r.id) ?? [],
+    clientCaIds: cas.get(r.id) ?? [],
     clientCertHeaders: !!r.client_cert_headers,
     noIndex: !!r.no_index,
     createdAt: r.created_at,
@@ -274,7 +221,6 @@ function toParams(h: ProxyHostInput) {
     scheme: h.scheme,
     insecure_skip_verify: h.insecureSkipVerify ? 1 : 0,
     enabled: h.enabled ? 1 : 0,
-    basic_auth: h.basicAuth ? 1 : 0,
     client_auth: h.clientAuth,
     client_cert_headers: h.clientCertHeaders ? 1 : 0,
     no_index: h.noIndex ? 1 : 0,
@@ -288,35 +234,28 @@ function setLinks(hostId: number, h: ProxyHostInput) {
   if (h.clientAuth !== "off" && !ids.length) throw new Error("Client certificates need at least one CA");
   const insert = db.query("INSERT INTO host_client_cas (host_id, ca_id) VALUES (?, ?)");
   for (const caId of ids) insert.run(hostId, caId);
-
-  db.query("DELETE FROM host_basic_auth_users WHERE host_id = ?").run(hostId);
-  const userIds = h.basicAuth ? h.basicAuthUserIds : [];
-  // Likewise, basic auth without users would leave the service open.
-  if (h.basicAuth && !userIds.length) throw new Error("Basic auth needs at least one user");
-  const insertUser = db.query("INSERT INTO host_basic_auth_users (host_id, user_id) VALUES (?, ?)");
-  for (const userId of userIds) insertUser.run(hostId, userId);
 }
 
 export const hosts = {
   list(): ProxyHost[] {
-    const links = allLinks();
+    const cas = caLinks();
     return db
       .query<ProxyHostRow, []>("SELECT * FROM proxy_hosts ORDER BY id")
       .all()
-      .map((r) => toHost(r, links));
+      .map((r) => toHost(r, cas));
   },
   get(id: number): ProxyHost | null {
     const row = db.query<ProxyHostRow, [number]>("SELECT * FROM proxy_hosts WHERE id = ?").get(id);
     return row ? toHost(row) : null;
   },
-  /** Throws a SQLite foreign key error if one of the CAs or users doesn't exist (anymore); nothing is written then. */
+  /** Throws a SQLite foreign key error if one of the CAs doesn't exist (anymore); nothing is written then. */
   create: db.transaction((h: ProxyHostInput): ProxyHost => {
     const row = db
       .query<ProxyHostRow, any>(
         `INSERT INTO proxy_hosts (domains, device_id, device_name, target_ip, target_port, scheme, insecure_skip_verify, enabled,
-           basic_auth, client_auth, client_cert_headers, no_index, alias_modes)
+           client_auth, client_cert_headers, no_index, alias_modes)
          VALUES ($domains, $device_id, $device_name, $target_ip, $target_port, $scheme, $insecure_skip_verify, $enabled,
-           $basic_auth, $client_auth, $client_cert_headers, $no_index, $alias_modes)
+           $client_auth, $client_cert_headers, $no_index, $alias_modes)
          RETURNING *`,
       )
       .get(toParams(h))!;
@@ -328,7 +267,7 @@ export const hosts = {
       .query<ProxyHostRow, any>(
         `UPDATE proxy_hosts SET domains = $domains, device_id = $device_id, device_name = $device_name,
            target_ip = $target_ip, target_port = $target_port, scheme = $scheme,
-           insecure_skip_verify = $insecure_skip_verify, enabled = $enabled, basic_auth = $basic_auth,
+           insecure_skip_verify = $insecure_skip_verify, enabled = $enabled,${hasBasicAuthColumn ? " basic_auth = 0," : ""}
            client_auth = $client_auth, client_cert_headers = $client_cert_headers,
            no_index = $no_index, alias_modes = $alias_modes, updated_at = datetime('now')
          WHERE id = $id RETURNING *`,
@@ -472,51 +411,6 @@ export const clientCas = {
   /** Throws a SQLite foreign key error while a service still trusts the CA. */
   delete(id: number): boolean {
     return db.query("DELETE FROM client_cas WHERE id = ?").run(id).changes > 0;
-  },
-};
-
-interface BasicAuthUserRow {
-  id: number;
-  username: string;
-  hash: string;
-  created_at: string;
-  updated_at: string;
-}
-
-const toUser = (r: BasicAuthUserRow): BasicAuthUser => ({
-  id: r.id,
-  username: r.username,
-  hash: r.hash,
-  createdAt: r.created_at,
-  updatedAt: r.updated_at,
-});
-
-export const basicAuthUsers = {
-  list(): BasicAuthUser[] {
-    return db.query<BasicAuthUserRow, []>("SELECT * FROM basic_auth_users ORDER BY username, id").all().map(toUser);
-  },
-  get(id: number): BasicAuthUser | null {
-    const row = db.query<BasicAuthUserRow, [number]>("SELECT * FROM basic_auth_users WHERE id = ?").get(id);
-    return row ? toUser(row) : null;
-  },
-  create(username: string, hash: string): BasicAuthUser {
-    return toUser(
-      db
-        .query<BasicAuthUserRow, [string, string]>("INSERT INTO basic_auth_users (username, hash) VALUES (?, ?) RETURNING *")
-        .get(username, hash)!,
-    );
-  },
-  update(id: number, patch: { username: string; hash: string }): BasicAuthUser | null {
-    const row = db
-      .query<BasicAuthUserRow, [string, string, number]>(
-        "UPDATE basic_auth_users SET username = ?, hash = ?, updated_at = datetime('now') WHERE id = ? RETURNING *",
-      )
-      .get(patch.username, patch.hash, id);
-    return row ? toUser(row) : null;
-  },
-  /** Throws a SQLite foreign key error while a service still uses the user. */
-  delete(id: number): boolean {
-    return db.query("DELETE FROM basic_auth_users WHERE id = ?").run(id).changes > 0;
   },
 };
 

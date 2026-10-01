@@ -16,7 +16,7 @@
 # 4. backs up the data, the certificates and the CrowdSec volumes, then recreates the stack without CrowdSec;
 # 5. deletes the CrowdSec volumes once nothing uses them, after asking.
 #
-# Your services, users and certificates stay in the same volumes: the database is upgraded when the app starts, and
+# Your services and certificates stay in the same volumes: the database is upgraded when the app starts, and
 # the earlier commit still runs on it after a rollback. Services are down for the few seconds the containers are
 # recreated.
 set -eu
@@ -151,6 +151,7 @@ migrate() {
   cat <<EOT
 - Rate limiting replaces CrowdSec. It stays off until you turn it on under Security → Rate limiting.
 - Traefik now refuses TLS for hostnames it has no certificate for, including clients that send none.
+- Basic auth is gone: services that used it are off unless they require a client certificate (see the app log).
 - Every service now sends HSTS.
 - The CrowdSec image is still on the host: docker image rm crowdsecurity/crowdsec:<tag> frees the space.
 - Backup: $backup. To undo: $0 rollback

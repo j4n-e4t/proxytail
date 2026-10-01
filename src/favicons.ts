@@ -2,7 +2,7 @@ import type { ProxyHost } from "./db";
 
 /**
  * Fetches a service's favicon straight from its backend over the tailnet (the browser can't reach 100.x addresses,
- * and going through the public hostname would hit basic auth). Results, including misses, are cached in memory.
+ * and going through the public hostname would need a client certificate). Results, including misses, are cached in memory.
  */
 
 export interface Favicon {

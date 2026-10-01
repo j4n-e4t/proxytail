@@ -55,6 +55,7 @@ migrate() {
   cat <<EOT
 - Rate limiting stays off. Turn it on under Security → Rate limiting.
 - Traefik now refuses TLS for hostnames it has no certificate for, including clients that send none.
+- Basic auth is gone: services that used it are off unless they require a client certificate (see the app log).
 - Backup: $backup. To undo: $0 rollback
 EOT
 }

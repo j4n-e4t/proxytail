@@ -1,5 +1,5 @@
 import { certificateFor, type CertInfo } from "./certs";
-import { basicAuthUsers, clientCas, hosts, type ProxyHost } from "./db";
+import { clientCas, hosts, type ProxyHost } from "./db";
 import { rateLimitMiddleware } from "./ratelimit";
 
 // Every service is served over HTTPS with a Let's Encrypt certificate; plain HTTP is redirected by Traefik.
@@ -49,7 +49,6 @@ export function buildConfig() {
   const middlewares: Record<string, unknown> = {};
   const tlsOptions: Record<string, unknown> = {};
   const cas = new Map(clientCas.list().map((ca) => [ca.id, ca]));
-  const users = new Map(basicAuthUsers.list().map((u) => [u.id, u]));
   const rateLimit = rateLimitMiddleware();
 
   for (const h of hosts.list()) {
@@ -94,36 +93,18 @@ export function buildConfig() {
         chain.push(`${name}-client-cert-strip`, `${name}-client-cert`);
       }
     }
-    const authUsers = h.basicAuth ? h.basicAuthUserIds.map((id) => users.get(id)).filter((u) => !!u) : [];
-    // Fail closed here too: basic auth without anyone to let in never publishes the service without the password check.
-    if (h.basicAuth && !authUsers.length) {
-      console.error(`Not routing ${h.domains[0]}: it requires basic auth but has no users`);
-      continue;
-    }
-    if (authUsers.length) {
-      middlewares[`${name}-auth`] = {
-        basicAuth: {
-          users: authUsers.map((u) => `${u.username}:${u.hash}`),
-          realm: h.domains[0],
-          // Don't leak the credentials to the upstream service.
-          removeHeader: true,
-        },
-      };
-      chain.push(`${name}-auth`);
-    }
     // Parallel aliases: the service sees its own hostname, whichever one the client asked for.
     if (parallel.length) {
       middlewares[`${name}-host`] = { headers: { customRequestHeaders: { Host: hostname } } };
       chain.push(`${name}-host`);
     }
-    // Rate limiting goes first, so it also slows down guessing basic auth passwords. Each service has its own
-    // middleware, and so its own buckets.
+    // Rate limiting goes first. Each service has its own middleware, and so its own buckets.
     if (rateLimit) {
       middlewares[`${name}-ratelimit`] = rateLimit;
       chain.unshift(`${name}-ratelimit`);
     }
     // Hide from search engines (Advanced in the editor). First, so it's also on responses the middlewares answer
-    // themselves (401, 429).
+    // themselves (429).
     if (h.noIndex) {
       middlewares[`${name}-noindex`] = { headers: { customResponseHeaders: { "X-Robots-Tag": "noindex, nofollow" } } };
       chain.unshift(`${name}-noindex`);

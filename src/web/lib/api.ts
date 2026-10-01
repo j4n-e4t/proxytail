@@ -23,10 +23,6 @@ export interface ProxyHost {
   scheme: "http" | "https";
   insecureSkipVerify: boolean;
   enabled: boolean;
-  basicAuth: boolean;
-  basicAuthUserIds: number[];
-  /** The attached users' names, for display. */
-  basicAuthUsers: { id: number; username: string }[];
   clientAuth: ClientAuth;
   clientCaIds: number[];
   clientCertHeaders: boolean;
@@ -45,22 +41,11 @@ export type ProxyHostDraft = Pick<
   | "scheme"
   | "insecureSkipVerify"
   | "enabled"
-  | "basicAuth"
-  | "basicAuthUserIds"
   | "clientAuth"
   | "clientCaIds"
   | "clientCertHeaders"
   | "noIndex"
 >;
-
-export interface BasicAuthUser {
-  id: number;
-  username: string;
-  createdAt: string;
-  updatedAt: string;
-  /** Services the user can sign in to. */
-  hostIds: number[];
-}
 
 export interface CertSummary {
   subject: string;
@@ -286,13 +271,6 @@ export const api = {
   createClientCa: (ca: { name: string; pem: string }) => request<ClientCa>("POST", "/api/client-cas", ca),
   renameClientCa: (id: number, name: string) => request<ClientCa>("PATCH", `/api/client-cas/${id}`, { name }),
   deleteClientCa: (id: number) => request<void>("DELETE", `/api/client-cas/${id}`),
-  basicAuthUsers: () => request<BasicAuthUser[]>("GET", "/api/basic-auth-users"),
-  createBasicAuthUser: (u: { username: string; password: string }) =>
-    request<BasicAuthUser>("POST", "/api/basic-auth-users", u),
-  /** An empty or missing password keeps the current one. */
-  updateBasicAuthUser: (id: number, patch: { username?: string; password?: string }) =>
-    request<BasicAuthUser>("PATCH", `/api/basic-auth-users/${id}`, patch),
-  deleteBasicAuthUser: (id: number) => request<void>("DELETE", `/api/basic-auth-users/${id}`),
   detectIp: () => request<{ ip: string }>("POST", "/api/settings/detect-ip"),
   settings: () => request<Settings>("GET", "/api/settings"),
   saveSettings: (s: Record<string, string | null>) => request<Settings>("PUT", "/api/settings", s),

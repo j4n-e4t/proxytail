@@ -168,7 +168,7 @@ export function RateLimitingPage() {
             <div className="space-y-1">
               <Label htmlFor="rate-limit-enabled">Limit requests</Label>
               <p className="text-xs text-muted-foreground">
-                On every service, before basic auth. Each client IP has its own budget per service.
+                On every service, before anything else. Each client IP has its own budget per service.
               </p>
             </div>
             <Switch id="rate-limit-enabled" checked={draft.enabled} onCheckedChange={(enabled) => set({ enabled })} />
