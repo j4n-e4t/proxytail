@@ -15,6 +15,24 @@ import {
   Waypoints,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarInset,
+  SidebarMenu,
+  SidebarMenuBadge,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarRail,
+  SidebarTrigger,
+} from "@/components/ui/sidebar";
 import { Card, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Toaster } from "@/components/ui/sonner";
@@ -22,7 +40,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { usePoll } from "@/hooks/use-poll";
 import { api } from "@/lib/api";
 import { useTheme, type Theme } from "@/lib/theme";
-import { cn } from "@/lib/utils";
 import { ClientCasPage } from "@/pages/client-cas";
 import { PeersPage } from "@/pages/peers";
 import { RateLimitingPage } from "@/pages/rate-limiting";
@@ -93,27 +110,30 @@ function loadCollapsed(): string[] {
   }
 }
 
+/** Whether the sidebar was left open, from the cookie SidebarProvider writes. */
+function sidebarOpenByDefault() {
+  return !document.cookie.split("; ").includes("sidebar_state=false");
+}
+
 function NavItem(props: { item: NavEntry; active: boolean; onClick: () => void }) {
   const { icon: Icon, label, count } = props.item;
   return (
-    <button
-      onClick={props.onClick}
-      aria-current={props.active ? "page" : undefined}
-      className={cn(
-        "flex h-8 w-full items-center gap-3 rounded-md px-3 text-sm font-medium transition-colors",
-        props.active
-          ? "bg-sidebar-accent text-sidebar-accent-foreground"
-          : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
-      )}
-    >
-      <Icon className={cn("size-4 shrink-0", props.active && "text-primary")} />
-      {label}
-      {count !== undefined && <span className="ml-auto text-xs text-muted-foreground tabular-nums">{count}</span>}
-    </button>
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        isActive={props.active}
+        tooltip={label}
+        onClick={props.onClick}
+        aria-current={props.active ? "page" : undefined}
+      >
+        <Icon />
+        <span>{label}</span>
+      </SidebarMenuButton>
+      {count !== undefined && <SidebarMenuBadge>{count}</SidebarMenuBadge>}
+    </SidebarMenuItem>
   );
 }
 
-/** A titled group of entries that folds away from its header. */
+/** A titled group of entries that folds away from its label. */
 function NavGroup(props: {
   group: NavGroupDef;
   open: boolean;
@@ -121,46 +141,77 @@ function NavGroup(props: {
   onToggle: () => void;
   onNavigate: (target: Page) => void;
 }) {
-  const { group, open } = props;
+  const { group } = props;
   return (
-    <div>
-      <button
-        onClick={props.onToggle}
-        aria-expanded={open}
-        className="flex h-7 w-full items-center gap-2 rounded-md px-3 text-xs font-medium text-muted-foreground/80 transition-colors hover:text-foreground"
-      >
-        {group.label}
-        <ChevronDown className={cn("ml-auto size-3.5 transition-transform", !open && "-rotate-90")} />
-      </button>
-      {/* grid-rows animates the height without measuring it. */}
-      <div
-        className={cn(
-          "grid transition-[grid-template-rows] duration-200",
-          open ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
-        )}
-      >
-        <div className="space-y-0.5 overflow-hidden pt-0.5" inert={!open}>
-          {group.items.map((item) => (
-            <NavItem
-              key={item.target}
-              item={item}
-              active={props.active === item.target}
-              onClick={() => props.onNavigate(item.target)}
-            />
-          ))}
-        </div>
-      </div>
-    </div>
+    <Collapsible open={props.open} onOpenChange={props.onToggle} className="group/collapsible">
+      <SidebarGroup>
+        <SidebarGroupLabel asChild>
+          <CollapsibleTrigger>
+            {group.label}
+            <ChevronDown className="ml-auto transition-transform group-data-[state=closed]/collapsible:-rotate-90" />
+          </CollapsibleTrigger>
+        </SidebarGroupLabel>
+        <CollapsibleContent>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {group.items.map((item) => (
+                <NavItem
+                  key={item.target}
+                  item={item}
+                  active={props.active === item.target}
+                  onClick={() => props.onNavigate(item.target)}
+                />
+              ))}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </CollapsibleContent>
+      </SidebarGroup>
+    </Collapsible>
   );
 }
 
 function Brand() {
   return (
-    <div className="flex h-16 items-center gap-2.5 px-5">
-      <div className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
-        <Waypoints className="size-4" />
-      </div>
-      <p className="font-semibold tracking-tight">proxytail</p>
+    <SidebarMenu>
+      <SidebarMenuItem>
+        <SidebarMenuButton size="lg" asChild>
+          <a href="#services">
+            <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
+              <Waypoints className="size-4" />
+            </div>
+            <span className="font-semibold tracking-tight">proxytail</span>
+          </a>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    </SidebarMenu>
+  );
+}
+
+function ThemeToggle() {
+  const { theme, setTheme } = useTheme();
+  return (
+    <div className="flex items-center justify-between px-2 py-1 group-data-[collapsible=icon]:hidden">
+      <span className="text-xs text-muted-foreground">Theme</span>
+      <ToggleGroup
+        type="single"
+        size="sm"
+        variant="outline"
+        value={theme}
+        onValueChange={(v) => v && setTheme(v as Theme)}
+        aria-label="Theme"
+      >
+        {(
+          [
+            ["light", Sun, "Light"],
+            ["dark", Moon, "Dark"],
+            ["system", Monitor, "System"],
+          ] as const
+        ).map(([value, Icon, label]) => (
+          <ToggleGroupItem key={value} value={value} aria-label={label} title={label} className="px-2">
+            <Icon className="size-3.5" />
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
     </div>
   );
 }
@@ -194,7 +245,6 @@ function Console() {
   const [route, navigate] = useRoute();
   const page = route.page;
   const setPage = (p: Page) => navigate(p);
-  const { theme, setTheme } = useTheme();
   const hosts = usePoll(api.hosts, 0);
   // Polled for the proxy host's Tailscale version on the Settings page, known once devices have been listed.
   const settings = usePoll(api.settings, 30_000);
@@ -268,11 +318,13 @@ function Console() {
   const editor = lastEditor.current;
 
   return (
-    <div className="flex min-h-screen">
-      <aside className="sticky top-0 flex h-screen w-60 shrink-0 flex-col border-r bg-sidebar">
-        <Brand />
+    <SidebarProvider defaultOpen={sidebarOpenByDefault()}>
+      <Sidebar collapsible="icon">
+        <SidebarHeader>
+          <Brand />
+        </SidebarHeader>
 
-        <nav aria-label="Main" className="flex-1 space-y-3 overflow-y-auto px-3 py-2">
+        <SidebarContent>
           {navGroups.map((g) => (
             <NavGroup
               key={g.id}
@@ -283,42 +335,26 @@ function Console() {
               onNavigate={navigate}
             />
           ))}
-        </nav>
+        </SidebarContent>
 
-        <div className="space-y-1 border-t p-3">
-          {/* Settings has its own sidebar for its sections, so it's a single entry here. */}
-          <NavItem
-            item={{ target: "settings", label: "Settings", icon: SlidersHorizontal }}
-            active={page === "settings"}
-            onClick={() => setPage("settings")}
-          />
-          <div className="flex items-center justify-between px-3 py-1">
-            <span className="text-xs text-muted-foreground">Theme</span>
-            <ToggleGroup
-              type="single"
-              size="sm"
-              variant="outline"
-              value={theme}
-              onValueChange={(v) => v && setTheme(v as Theme)}
-              aria-label="Theme"
-            >
-              {(
-                [
-                  ["light", Sun, "Light"],
-                  ["dark", Moon, "Dark"],
-                  ["system", Monitor, "System"],
-                ] as const
-              ).map(([value, Icon, label]) => (
-                <ToggleGroupItem key={value} value={value} aria-label={label} title={label} className="px-2">
-                  <Icon className="size-3.5" />
-                </ToggleGroupItem>
-              ))}
-            </ToggleGroup>
-          </div>
-        </div>
-      </aside>
+        <SidebarFooter>
+          <SidebarMenu>
+            {/* Settings has its own sidebar for its sections, so it's a single entry here. */}
+            <NavItem
+              item={{ target: "settings", label: "Settings", icon: SlidersHorizontal }}
+              active={page === "settings"}
+              onClick={() => setPage("settings")}
+            />
+          </SidebarMenu>
+          <ThemeToggle />
+        </SidebarFooter>
+        <SidebarRail />
+      </Sidebar>
 
-      <main className="min-w-0 flex-1">
+      <SidebarInset className="min-w-0">
+        <header className="flex h-12 shrink-0 items-center border-b px-4">
+          <SidebarTrigger className="-ml-1" />
+        </header>
         <div className="px-6 py-8 lg:px-10">
           {page === "services" && (
             <HostsPage
@@ -387,7 +423,7 @@ function Console() {
             />
           )}
         </div>
-      </main>
+      </SidebarInset>
 
       <ServiceEditorDialog
         open={editorOpen}
@@ -407,7 +443,7 @@ function Console() {
           setPage("services");
         }}
       />
-    </div>
+    </SidebarProvider>
   );
 }
 

@@ -9,3 +9,5 @@ dist
 # Terraform
 terraform
 backups
+
+client-certs

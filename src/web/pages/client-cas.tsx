@@ -78,7 +78,7 @@ function CertDetails({ summary }: { summary: CertSummary }) {
 }
 
 const textareaClass =
-  "min-h-40 w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30";
+  "min-h-40 w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30";
 
 function AddCaDialog(props: { open: boolean; onOpenChange: (open: boolean) => void; onAdded: (ca: ClientCa) => void }) {
   const [name, setName] = useState("");

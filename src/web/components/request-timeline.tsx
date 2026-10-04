@@ -121,7 +121,7 @@ export function RequestTimeline({ stats }: { stats: AccessLogStats }) {
 
       {hovered && hover !== null && (
         <div
-          className="pointer-events-none absolute z-10 w-44 rounded-md border bg-popover p-2.5 text-xs shadow-md"
+          className="pointer-events-none absolute z-10 w-44 rounded-md border bg-popover p-2.5 text-xs"
           style={{
             top: PAD.top,
             // Beside the bar, on whichever side has room.
